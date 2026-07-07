@@ -4,11 +4,16 @@ const App = {
   streamInterval: null,
   wsAlerts: null,
   wsStream: null,
+  assistantHistory: [],
+  assistantThinking: false,
+  assistantRecognition: null,
+  assistantVoiceEnabled: true,
 
   init() {
     this.bindTabs();
     this.bindNav();
     this.bindFileInputs();
+    this.initAssistant();
     if (this.token) this.showMain();
     else document.getElementById('login-page').classList.add('active');
   },
@@ -376,6 +381,179 @@ const App = {
       this.showToast({ level: 'info', title: data.title, summary: data.summary });
       this.loadAlerts();
     } catch (e) { alert(e.message); }
+  },
+
+  initAssistant() {
+    const input = document.getElementById('assistant-input');
+    if (input) {
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') this.askAssistant();
+      });
+    }
+    this.renderAssistantHistory();
+    this.setAssistantStatus('准备就绪');
+  },
+
+  toggleAssistant() {
+    const panel = document.getElementById('assistant-panel');
+    const toggle = document.getElementById('assistant-toggle');
+    if (!panel || !toggle) return;
+    const isHidden = panel.classList.toggle('hidden');
+    toggle.classList.toggle('active', !isHidden);
+    toggle.setAttribute('aria-expanded', String(!isHidden));
+    if (!isHidden) {
+      this.renderAssistantHistory();
+      document.addEventListener('click', this.closeAssistantOnOutsideClick);
+    } else {
+      document.removeEventListener('click', this.closeAssistantOnOutsideClick);
+    }
+  },
+
+  closeAssistantOnOutsideClick(evt) {
+    const panel = document.getElementById('assistant-panel');
+    const toggle = document.getElementById('assistant-toggle');
+    if (!panel || !toggle) return;
+    if (evt.target instanceof Element && !panel.contains(evt.target) && !toggle.contains(evt.target)) {
+      panel.classList.add('hidden');
+      toggle.classList.remove('active');
+      toggle.setAttribute('aria-expanded', 'false');
+      document.removeEventListener('click', App.closeAssistantOnOutsideClick);
+    }
+  },
+
+  setAssistantStatus(text, isThinking = false) {
+    const el = document.getElementById('assistant-status');
+    if (!el) return;
+    el.classList.toggle('thinking', isThinking);
+    el.innerHTML = isThinking ? `<span class="assistant-thinking"><span></span><span></span><span></span></span> ${text}` : text;
+  },
+
+  addAssistantMessage(role, content) {
+    this.assistantHistory.push({ role, content });
+    this.renderAssistantHistory();
+  },
+
+  renderAssistantHistory() {
+    const box = document.getElementById('assistant-history');
+    if (!box) return;
+    box.innerHTML = this.assistantHistory.map(msg => `
+      <div class="assistant-msg ${msg.role}">
+        <div class="assistant-msg-bubble">${this.escapeHtml(msg.content)}</div>
+      </div>
+    `).join('');
+    box.scrollTop = box.scrollHeight;
+  },
+
+  escapeHtml(text) {
+    return String(text).replace(/[&<>'"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[m]));
+  },
+
+  async askAssistant(question) {
+    const input = document.getElementById('assistant-input');
+    const q = typeof question === 'string' ? question : input?.value?.trim();
+    if (!q || this.assistantThinking) return;
+
+    this.addAssistantMessage('user', q);
+    if (input) input.value = '';
+    this.assistantThinking = true;
+    this.setAssistantStatus('Alert Agent 正在思考...', true);
+
+    const toggle = document.getElementById('assistant-toggle');
+    if (toggle) toggle.classList.add('thinking');
+    const panel = document.getElementById('assistant-panel');
+    if (panel) panel.classList.add('assistant-processing');
+
+    try {
+      const data = await this.api('/api/monitor/assistant', {
+        method: 'POST',
+        body: JSON.stringify({ question: q, event_type: 'unknown', path: '/api/monitor' }),
+      });
+      const answer = data.answer || '暂无回答';
+      this.addAssistantMessage('assistant', answer);
+      this.setAssistantStatus('分析完成，随时可以继续提问');
+      if (this.assistantVoiceEnabled) this.speakAssistant(answer);
+    } catch (e) {
+      this.addAssistantMessage('assistant', `请求失败: ${e.message}`);
+      this.setAssistantStatus('请求失败，请稍后重试');
+    } finally {
+      this.assistantThinking = false;
+      const toggle = document.getElementById('assistant-toggle');
+      if (toggle) toggle.classList.remove('thinking');
+      if (panel) panel.classList.remove('assistant-processing');
+    }
+  },
+
+  startDrag(evt) {
+    const panel = document.getElementById('assistant-panel');
+    if (!panel || evt.target.closest('.assistant-close') || evt.target.closest('.assistant-icon-btn') || evt.target.closest('button') || evt.target.closest('input') || evt.target.closest('.assistant-history')) return;
+    evt.preventDefault();
+    this.dragOffsetX = evt.clientX - panel.getBoundingClientRect().left;
+    this.dragOffsetY = evt.clientY - panel.getBoundingClientRect().top;
+    panel.classList.add('dragging');
+
+    const onMouseMove = (moveEvt) => {
+      panel.style.left = `${moveEvt.clientX - this.dragOffsetX}px`;
+      panel.style.top = `${moveEvt.clientY - this.dragOffsetY}px`;
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+    };
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      panel.classList.remove('dragging');
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  },
+
+  startVoiceInput() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      this.setAssistantStatus('当前浏览器不支持语音输入');
+      return;
+    }
+    if (this.assistantRecognition) {
+      this.assistantRecognition.stop();
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'zh-CN';
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    this.assistantRecognition = recognition;
+
+    const toggle = document.getElementById('assistant-toggle');
+    if (toggle) toggle.classList.add('listening');
+
+    recognition.onstart = () => this.setAssistantStatus('正在聆听...', false);
+    recognition.onresult = (event) => {
+      const transcript = Array.from(event.results).map(r => r[0].transcript).join('');
+      const input = document.getElementById('assistant-input');
+      if (input) input.value = transcript;
+      this.askAssistant(transcript);
+    };
+    recognition.onerror = (e) => {
+      this.setAssistantStatus(`语音输入失败: ${e.error}`);
+    };
+    recognition.onend = () => {
+      this.assistantRecognition = null;
+      if (toggle) toggle.classList.remove('listening');
+      if (!this.assistantThinking) this.setAssistantStatus('准备就绪');
+    };
+    recognition.start();
+  },
+
+  speakAssistant(text) {
+    if (!('speechSynthesis' in window) || !text) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'zh-CN';
+    window.speechSynthesis.speak(utterance);
+  },
+
+  speakLastAnswer() {
+    const last = [...this.assistantHistory].reverse().find(msg => msg.role === 'assistant');
+    if (last) this.speakAssistant(last.content);
   },
 
   async loadLogs() {
