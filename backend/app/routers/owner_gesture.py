@@ -35,7 +35,7 @@ async def recognize(
     try:
         result = owner_gesture_service.recognize(content)
     except Exception as e:
-        write_log(db, "owner_gesture", f"识别失败: {e}", level="ERROR")
+        write_log(db, "owner_gesture", f"识别失败: {e}", level="ERROR", user_id=user.id if user else None)
         raise HTTPException(500, str(e))
 
     alert_agent.record_gesture_confidence("owner", result["confidence"])
@@ -59,7 +59,7 @@ async def recognize(
         state.is_awake = updated["is_awake"]
         state.updated_at = datetime.utcnow()
         db.commit()
-        write_log(db, "owner_gesture", f"手势触发: {result['gesture_cn']} -> {result['action']}")
+        write_log(db, "owner_gesture", f"手势触发: {result['gesture_cn']} -> {result['action']}", user_id=user_id)
 
     save_path = settings.upload_dir / "owner" / f"{uuid.uuid4().hex}.jpg"
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,7 +109,7 @@ def update_vehicle_state(
     state.is_awake = data.is_awake
     state.updated_at = datetime.utcnow()
     db.commit()
-    write_log(db, "owner_gesture", "手动更新车辆状态", detail=data.model_dump())
+    write_log(db, "owner_gesture", "手动更新车辆状态", detail=data.model_dump(), user_id=user.id if user else None)
     return data
 
 
@@ -140,53 +140,3 @@ def history(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
         }
         for r in records
     ]
-# 原有代码全部保留，只替换下面ws部分
-from fastapi import WebSocket, WebSocketDisconnect
-import numpy as np
-import cv2
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
-
-# 线程池，把同步mediapipe计算丢到后台线程，不阻塞主事件循环
-executor = ThreadPoolExecutor(max_workers=2)
-
-@router.websocket("/ws-stream")
-async def gesture_websocket(websocket: WebSocket, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    await websocket.accept()
-    user_id = user.id
-    try:
-        while True:
-            frame_bytes = await websocket.receive_bytes()
-            arr = np.frombuffer(frame_bytes, np.uint8)
-            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            if frame is None:
-                continue
-            # 关键修复：同步识别放到线程池执行，释放async事件循环
-            result = await asyncio.get_event_loop().run_in_executor(
-                executor,
-                owner_gesture_service.recognize_frame,
-                frame
-            )
-            if result.get("action"):
-                state = _get_or_create_state(db, user_id)
-                state_dict = {
-                    "volume": state.volume,
-                    "temperature": state.temperature,
-                    "phone_status": state.phone_status,
-                    "current_page": state.current_page,
-                    "is_awake": state.is_awake,
-                }
-                updated = owner_gesture_service.apply_action_to_state(result["action"], state_dict)
-                state.volume = updated["volume"]
-                state.temperature = updated["temperature"]
-                state.phone_status = updated["phone_status"]
-                state.current_page = updated["current_page"]
-                state.is_awake = updated["is_awake"]
-                state.updated_at = datetime.utcnow()
-                db.commit()
-            resp = GestureResponse(**result)
-            await websocket.send_json(resp.model_dump())
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        print("ws error:", e)
