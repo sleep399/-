@@ -1,15 +1,21 @@
-﻿from __future__ import annotations
 import base64
-import cv2
-import numpy as np
+
+from app.ccpd.decode import indices_to_plate
+from app.ccpd.load_data import parse_ccpd_filename
+
+__all__ = [
+    "image_to_base64",
+    "ndarray_to_base64",
+    "indices_to_plate",
+    "parse_ccpd_filename",
+]
 
 
 def image_to_base64(image_bytes: bytes) -> str:
     return base64.b64encode(image_bytes).decode("utf-8")
 
 
-def ndarray_to_base64(img: np.ndarray) -> str:
-    ok, buf = cv2.imencode(".jpg", img)
-    if not ok:
-        raise ValueError("Unable to encode image")
-    return base64.b64encode(buf.tobytes()).decode("utf-8")
+def ndarray_to_base64(img) -> str:
+    import cv2
+    _, buf = cv2.imencode(".jpg", img)
+    return base64.b64encode(buf).decode("utf-8")

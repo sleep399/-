@@ -1,9 +1,7 @@
-from __future__ import annotations
 import json
 import uuid
 from datetime import datetime
-from pathlib import Path
-from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query
+from fastapi import APIRouter, Depends, File, UploadFile, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.records import OwnerGestureRecord, VehicleState
@@ -12,7 +10,6 @@ from app.services.owner_gesture_service import owner_gesture_service, OWNER_GEST
 from app.services.alert_agent import alert_agent
 from app.utils.auth import get_current_user
 from app.utils.logger import write_log
-from app.utils.video import process_video_file
 from app.config import settings
 
 router = APIRouter(prefix="/api/owner-gesture", tags=["车主手势控车"])
@@ -28,7 +25,7 @@ def _get_or_create_state(db: Session, user_id: int | None) -> VehicleState:
     return state
 
 
-@router.post("/recognize", response_model=GestureResponse, summary="识别车主手势并触发控�?)
+@router.post("/recognize", response_model=GestureResponse, summary="识别车主手势并触发控车")
 async def recognize(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -86,31 +83,7 @@ async def recognize(
     return GestureResponse(**result, record_id=record.id)
 
 
-@router.post("/recognize-video")
-async def recognize_video(
-    file: UploadFile = File(...),
-    interval: int = Query(15, ge=1, le=120),
-    max_results: int = Query(60, ge=1, le=300),
-    max_sampled_frames: int = Query(120, ge=1, le=1000),
-    db: Session = Depends(get_db),
-    user=Depends(get_current_user),
-):
-    suffix = Path(file.filename or "").suffix or ".mp4"
-    save_path = settings.upload_dir / "owner" / f"{uuid.uuid4().hex}{suffix}"
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    save_path.write_bytes(await file.read())
-
-    try:
-        result = process_video_file(owner_gesture_service, save_path, interval, max_results, max_sampled_frames)
-    except Exception as e:
-        write_log(db, "owner_gesture", f"video recognition failed: {e}", level="ERROR", user_id=user.id if user else None)
-        raise HTTPException(500, str(e))
-
-    write_log(db, "owner_gesture", f"video recognition completed, sampled {result['sampled_frames']} frames, hits {result['result_count']}", user_id=user.id if user else None)
-    return result
-
-
-@router.get("/vehicle-state", response_model=VehicleStateResponse, summary="获取模拟车辆状�?)
+@router.get("/vehicle-state", response_model=VehicleStateResponse, summary="获取模拟车辆状态")
 def get_vehicle_state(db: Session = Depends(get_db), user=Depends(get_current_user)):
     state = _get_or_create_state(db, user.id if user else None)
     return VehicleStateResponse(
@@ -122,7 +95,7 @@ def get_vehicle_state(db: Session = Depends(get_db), user=Depends(get_current_us
     )
 
 
-@router.put("/vehicle-state", response_model=VehicleStateResponse, summary="手动更新车辆状�?)
+@router.put("/vehicle-state", response_model=VehicleStateResponse, summary="手动更新车辆状态")
 def update_vehicle_state(
     data: VehicleStateResponse,
     db: Session = Depends(get_db),
@@ -136,11 +109,11 @@ def update_vehicle_state(
     state.is_awake = data.is_awake
     state.updated_at = datetime.utcnow()
     db.commit()
-    write_log(db, "owner_gesture", "手动更新车辆状�?, detail=data.model_dump())
+    write_log(db, "owner_gesture", "手动更新车辆状态", detail=data.model_dump())
     return data
 
 
-@router.get("/gestures", summary="支持的手势列�?)
+@router.get("/gestures", summary="支持的手势列表")
 def gesture_list():
     seen = set()
     items = []
