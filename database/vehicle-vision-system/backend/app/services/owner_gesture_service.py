@@ -1,4 +1,3 @@
-from __future__ import annotations
 import io
 import math
 import time
@@ -14,10 +13,11 @@ from mediapipe.tasks.python import vision
 from app.config import settings
 from app.utils.helpers import ndarray_to_base64
 from app.utils.model_loader import get_model_path
+from app.utils.quiet_logs import suppress_native_stderr
 
 
 OWNER_GESTURES = {
-    "no_gesture": ("no_gesture", "无手�?, None),
+    "no_gesture": ("no_gesture", "无手势", None),
     "palm_open": ("palm_open", "手掌张开", "wake"),
     "fist": ("fist", "握拳", "confirm"),
     "circle": ("circle", "单指画圈", "volume_adjust"),
@@ -42,7 +42,8 @@ class OwnerGestureService:
             running_mode=vision.RunningMode.IMAGE,
             num_hands=1,
         )
-        self.landmarker = vision.HandLandmarker.create_from_options(options)
+        with suppress_native_stderr():
+            self.landmarker = vision.HandLandmarker.create_from_options(options)
         self._position_history: deque = deque(maxlen=20)
         self._gesture_start: dict[str, float] = {}
         self._circle_points: deque = deque(maxlen=30)
@@ -110,7 +111,7 @@ class OwnerGestureService:
         if now - self._last_action_time < 1.0 and gesture == self._last_gesture:
             return "no_gesture", confidence, None
 
-        _, _, action = OWNER_GESTURES.get(gesture, ("no_gesture", "无手�?, None))
+        _, _, action = OWNER_GESTURES.get(gesture, ("no_gesture", "无手势", None))
         self._last_gesture = gesture
         self._last_action_time = now
         self._gesture_start.clear()

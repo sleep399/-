@@ -75,32 +75,76 @@
         <!-- 车牌识别 -->
         <section id="view-lpr" class="view">
           <h2>道路车辆车牌识别</h2>
-          <div class="dual-panel">
-            <div class="panel">
+          <p class="section-desc">图片：CCPD GT + RPNet · 视频/摄像头：YOLO + LPRNet 实时多车牌识别</p>
+          <p id="lpr-model-status" class="section-desc model-warn">检测模型状态中…</p>
+          <p id="lpr-video-model-status" class="section-desc model-warn"></p>
+          <div class="lpr-layout">
+            <div class="panel lpr-input-panel">
+              <h3>输入源</h3>
               <div class="upload-area" id="lpr-upload">
                 <input type="file" id="lpr-file" accept="image/*,video/*" hidden>
-                <p>📷 上传道路场景图片或视频</p>
+                <div class="upload-icon">📷</div>
+                <p class="upload-title">拖拽图片或视频到此处</p>
+                <p class="upload-hint">支持 JPG / PNG / MP4，也可点击下方按钮选择</p>
+                <p class="upload-hint">CCPD 文件名自动走 CCPD 识别，其它文件自动走 LPRNet 识别</p>
                 <button class="btn" onclick="document.getElementById('lpr-file').click()">选择文件</button>
               </div>
-              <div class="stream-controls">
-                <button class="btn primary" onclick="App.startStream('lpr')">📹 开启摄像头实时识别</button>
-                <button class="btn" onclick="App.stopStream()">停止</button>
+              <div class="lpr-actions">
+                <button class="btn primary" onclick="App.startStream('lpr')">📹 摄像头实时识别</button>
+                <button class="btn" onclick="App.stopVideoStream()">停止视频/摄像头</button>
+                <button class="btn" onclick="App.loadCcpdSamples()">🧪 CCPD 测试样本</button>
               </div>
-              <div class="stream-url-row">
-                <input type="text" id="lpr-stream-url" placeholder="rtsp://... 或 http://... 视频流地址">
-                <button class="btn" onclick="App.startUrlStream('lpr')">连接视频流</button>
+              <div class="source-preview-wrap">
+                <video id="lpr-video-output" class="source-video" controls playsinline muted hidden></video>
+                <canvas id="lpr-canvas" hidden></canvas>
               </div>
-              <video id="lpr-video" autoplay playsinline muted hidden></video>
-              <canvas id="lpr-canvas" hidden></canvas>
+              <div class="video-playback-tools hidden" id="lpr-video-playback-tools">
+                <label for="lpr-video-speed">播放倍速</label>
+                <select id="lpr-video-speed">
+                  <option value="0.5">0.5x</option>
+                  <option value="0.75">0.75x</option>
+                  <option value="1" selected>1x</option>
+                  <option value="1.25">1.25x</option>
+                  <option value="1.5">1.5x</option>
+                  <option value="2">2x</option>
+                </select>
+              </div>
+              <div id="lpr-video-progress" class="video-progress hidden">
+                <div class="video-progress-bar"><div id="lpr-video-progress-fill"></div></div>
+                <span id="lpr-video-progress-text">视频识别中…</span>
+              </div>
+              <div id="lpr-ccpd-samples" class="ccpd-samples hidden"></div>
               <div id="lpr-results" class="results-box"></div>
             </div>
-            <div class="panel">
+            <div class="panel lpr-result-panel">
               <h3>识别结果</h3>
-              <img id="lpr-preview" class="preview-img" alt="识别预览">
-              <video id="lpr-upload-preview" class="preview-img" controls hidden></video>
-              <div id="lpr-plates" class="plate-list"></div>
+              <div class="lpr-preview-wrap">
+                <img id="lpr-preview" class="preview-img" alt="识别预览">
+                <div id="lpr-loading" class="loading-overlay hidden"></div>
+              </div>
+              <div class="result-group">
+                <div class="result-group-head">
+                  <h4>图片识别结果</h4>
+                  <span class="result-group-note">CCPD 文件名优先，普通图片回退模型识别</span>
+                </div>
+                <div id="lpr-image-result" class="results-box"></div>
+                <div id="lpr-hero" class="lpr-hero hidden">
+                  <div id="lpr-hero-plate" class="hero-plate">--</div>
+                  <div id="lpr-hero-meta" class="hero-meta"></div>
+                  <div id="lpr-hero-conf" class="hero-conf-bar"><div class="hero-conf-fill"></div></div>
+                </div>
+                <div id="lpr-plates" class="plate-list"></div>
+              </div>
+              <div class="result-group">
+                <div class="result-group-head">
+                  <h4>视频识别结果</h4>
+                  <span class="result-group-note">独立 YOLO+LPRNet 视频流程</span>
+                </div>
+                <div id="lpr-video-result" class="results-box"></div>
+                <div id="lpr-video-plates" class="plate-list"></div>
+              </div>
               <h3>历史记录</h3>
-              <div id="lpr-history" class="history-list"></div>
+              <div id="lpr-history" class="history-list lpr-history"></div>
             </div>
           </div>
         </section>
@@ -114,20 +158,12 @@
               <button class="btn" onclick="document.getElementById('police-file').click()">上传图片/视频</button>
               <button class="btn primary" onclick="App.startStream('police')">📹 实时识别</button>
               <button class="btn" onclick="App.stopStream()">停止</button>
-              <div class="stream-url-row">
-                <input type="text" id="police-stream-url" placeholder="rtsp://... 或 http://... 视频流地址">
-                <button class="btn" onclick="App.startUrlStream('police')">连接视频流</button>
-              </div>
               <video id="police-video" autoplay playsinline muted hidden></video>
               <canvas id="police-canvas" hidden></canvas>
               <div id="police-gesture-list" class="gesture-ref"></div>
             </div>
             <div class="panel">
               <img id="police-preview" class="preview-img" alt="手势预览">
-              <video id="police-upload-preview" class="preview-img" controls hidden></video>
-              <div id="police-upload-controls" class="video-control-row" hidden>
-                <button id="police-upload-play" class="btn primary" onclick="App.toggleUploadedPolicePlayback()">播放视频</button>
-              </div>
               <div id="police-result" class="gesture-result"></div>
               <div id="police-history" class="history-list"></div>
             </div>
@@ -143,17 +179,12 @@
               <button class="btn" onclick="document.getElementById('owner-file').click()">上传图片/视频</button>
               <button class="btn primary" onclick="App.startStream('owner')">📹 实时手势控制</button>
               <button class="btn" onclick="App.stopStream()">停止</button>
-              <div class="stream-url-row">
-                <input type="text" id="owner-stream-url" placeholder="rtsp://... 或 http://... 视频流地址">
-                <button class="btn" onclick="App.startUrlStream('owner')">连接视频流</button>
-              </div>
               <video id="owner-video" autoplay playsinline muted hidden></video>
               <canvas id="owner-canvas" hidden></canvas>
               <div id="owner-gestures" class="gesture-ref"></div>
             </div>
             <div class="panel">
               <img id="owner-preview" class="preview-img" alt="手部预览">
-              <video id="owner-upload-preview" class="preview-img" controls hidden></video>
               <div id="owner-result" class="gesture-result"></div>
               <div class="vehicle-panel">
                 <h3>🚗 模拟车辆控制面板</h3>
@@ -213,6 +244,6 @@
     <!-- 告警 Toast -->
     <div id="toast-container"></div>
   </div>
-  <script src="/static/js/app.js?v=20260709-local-video-annotation"></script>
+  <script src="/static/js/app.js"></script>
 </body>
 </html>

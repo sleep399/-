@@ -1,4 +1,3 @@
-from __future__ import annotations
 from pathlib import Path
 import logging
 import urllib.request
@@ -41,6 +40,6 @@ def get_model_path(name: str) -> str:
         if path.exists():
             path.unlink(missing_ok=True)
         raise FileNotFoundError(
-            f"无法自动下载 {name}。请�?CCPD-master README 手动下载 fh02.pth 并放�? {path}"
+            f"无法自动下载 {name}。请从 CCPD-master README 手动下载 fh02.pth 并放到: {path}"
         ) from exc
     return str(path)
