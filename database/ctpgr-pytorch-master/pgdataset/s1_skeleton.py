@@ -51,7 +51,25 @@ class PgdSkeleton(PgdLabel):
             return None
         with pkl_path.open('rb') as pickle_file:
             coords = pickle.load(pickle_file)
+        if PG.COORD_NATIVE not in coords or PG.COORD_NORM not in coords:
+            coords = self.__normalize_legacy_coords(coords)
         return coords
+
+    @staticmethod
+    def __normalize_legacy_coords(coords):
+        """Handle old pickle files saved before PG enum keys were reordered."""
+        arrays = [v for v in coords.values() if isinstance(v, np.ndarray) and v.ndim == 3]
+        native = coords.get(PG.COORD_NATIVE)
+        norm = coords.get(PG.COORD_NORM)
+        for arr in arrays:
+            max_value = np.nanmax(arr)
+            if max_value <= 1.5:
+                norm = arr
+            elif native is None or max_value > np.nanmax(native):
+                native = arr
+        if native is None or norm is None:
+            raise KeyError("coord cache does not contain native and normalized coordinates")
+        return {PG.COORD_NATIVE: native, PG.COORD_NORM: norm}
 
     def __predict_from_video(self, video_name):
         if self.predictor is None:

@@ -86,6 +86,10 @@
                 <button class="btn primary" onclick="App.startStream('lpr')">📹 开启摄像头实时识别</button>
                 <button class="btn" onclick="App.stopStream()">停止</button>
               </div>
+              <div class="stream-url-row">
+                <input type="text" id="lpr-stream-url" placeholder="rtsp://... 或 http://... 视频流地址">
+                <button class="btn" onclick="App.startUrlStream('lpr')">连接视频流</button>
+              </div>
               <video id="lpr-video" autoplay playsinline muted hidden></video>
               <canvas id="lpr-canvas" hidden></canvas>
               <div id="lpr-results" class="results-box"></div>
@@ -93,6 +97,7 @@
             <div class="panel">
               <h3>识别结果</h3>
               <img id="lpr-preview" class="preview-img" alt="识别预览">
+              <video id="lpr-upload-preview" class="preview-img" controls hidden></video>
               <div id="lpr-plates" class="plate-list"></div>
               <h3>历史记录</h3>
               <div id="lpr-history" class="history-list"></div>
@@ -109,12 +114,17 @@
               <button class="btn" onclick="document.getElementById('police-file').click()">上传图片/视频</button>
               <button class="btn primary" onclick="App.startStream('police')">📹 实时识别</button>
               <button class="btn" onclick="App.stopStream()">停止</button>
+              <div class="stream-url-row">
+                <input type="text" id="police-stream-url" placeholder="rtsp://... 或 http://... 视频流地址">
+                <button class="btn" onclick="App.startUrlStream('police')">连接视频流</button>
+              </div>
               <video id="police-video" autoplay playsinline muted hidden></video>
               <canvas id="police-canvas" hidden></canvas>
               <div id="police-gesture-list" class="gesture-ref"></div>
             </div>
             <div class="panel">
               <img id="police-preview" class="preview-img" alt="手势预览">
+              <video id="police-upload-preview" class="preview-img" controls hidden></video>
               <div id="police-result" class="gesture-result"></div>
               <div id="police-history" class="history-list"></div>
             </div>
@@ -130,12 +140,17 @@
               <button class="btn" onclick="document.getElementById('owner-file').click()">上传图片/视频</button>
               <button class="btn primary" onclick="App.startStream('owner')">📹 实时手势控制</button>
               <button class="btn" onclick="App.stopStream()">停止</button>
+              <div class="stream-url-row">
+                <input type="text" id="owner-stream-url" placeholder="rtsp://... 或 http://... 视频流地址">
+                <button class="btn" onclick="App.startUrlStream('owner')">连接视频流</button>
+              </div>
               <video id="owner-video" autoplay playsinline muted hidden></video>
               <canvas id="owner-canvas" hidden></canvas>
               <div id="owner-gestures" class="gesture-ref"></div>
             </div>
             <div class="panel">
               <img id="owner-preview" class="preview-img" alt="手部预览">
+              <video id="owner-upload-preview" class="preview-img" controls hidden></video>
               <div id="owner-result" class="gesture-result"></div>
               <div class="vehicle-panel">
                 <h3>🚗 模拟车辆控制面板</h3>
@@ -195,6 +210,6 @@
     <!-- 告警 Toast -->
     <div id="toast-container"></div>
   </div>
-  <script src="/static/js/app.js"></script>
+  <script src="/static/js/app.js?v=20260708-visible-video-frame-source"></script>
 </body>
 </html>

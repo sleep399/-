@@ -30,8 +30,8 @@ class BoneLengthAngle:
     P: num_pairs 骨头配对数量（用于夹角计算）
     """
     def __init__(self):
-        self.connections = np.asarray(aic_bones, np.int) - 1
-        self.pairs = np.asarray(aic_bone_pairs, np.int) - 1
+        self.connections = np.asarray(aic_bones, dtype=int) - 1
+        self.pairs = np.asarray(aic_bone_pairs, dtype=int) - 1
 
     def handcrafted_features(self, coord_norm):
         assert len(coord_norm.shape) == 3  # (F, X, J)

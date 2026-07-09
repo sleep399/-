@@ -16,4 +16,4 @@ if __name__ == "__main__":
     print(f"  API 文档: http://localhost:{settings.port}/api/docs")
     print(f"  默认账号: admin / admin123")
     print(f"{'='*50}\n")
-    uvicorn.run("app.main:app", host=settings.host, port=settings.port, reload=settings.debug)
+    uvicorn.run("app.main:app", host=settings.host, port=settings.port, reload=False)

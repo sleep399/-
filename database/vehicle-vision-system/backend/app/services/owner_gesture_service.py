@@ -1,3 +1,4 @@
+from __future__ import annotations
 import io
 import math
 import time
@@ -16,7 +17,7 @@ from app.utils.model_loader import get_model_path
 
 
 OWNER_GESTURES = {
-    "no_gesture": ("no_gesture", "无手势", None),
+    "no_gesture": ("no_gesture", "无手�?, None),
     "palm_open": ("palm_open", "手掌张开", "wake"),
     "fist": ("fist", "握拳", "confirm"),
     "circle": ("circle", "单指画圈", "volume_adjust"),
@@ -109,7 +110,7 @@ class OwnerGestureService:
         if now - self._last_action_time < 1.0 and gesture == self._last_gesture:
             return "no_gesture", confidence, None
 
-        _, _, action = OWNER_GESTURES.get(gesture, ("no_gesture", "无手势", None))
+        _, _, action = OWNER_GESTURES.get(gesture, ("no_gesture", "无手�?, None))
         self._last_gesture = gesture
         self._last_action_time = now
         self._gesture_start.clear()

@@ -1,3 +1,4 @@
+from __future__ import annotations
 """CCPD RPNet end-to-end license plate detection and recognition.
 
 Robust inference: multi-variant preprocessing, best-pass selection, crop refinement.
@@ -326,7 +327,7 @@ def _pick_bbox(bboxes: list[list[int]], img_w: int, img_h: int) -> list[int]:
 
 
 class CCPDRPNetRecognizer:
-    """CCPD RPNet â€” runs multiple preprocess variants and keeps the best pass."""
+    """CCPD RPNet â€?runs multiple preprocess variants and keeps the best pass."""
 
     def __init__(self, model_path: str):
         self._model_path = model_path

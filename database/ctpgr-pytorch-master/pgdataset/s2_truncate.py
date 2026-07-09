@@ -25,5 +25,5 @@ class PgdTruncate(PgdSkeleton):
         res_dict[PG.COORD_NORM] = res_dict[PG.COORD_NORM][truncate]
         res_dict[PG.GESTURE_LABEL] = res_dict[PG.GESTURE_LABEL][truncate]
         # 标签后移
-        res_dict[PG.GESTURE_LABEL] = np.concatenate((np.zeros(self.LABEL_DELAY, dtype=np.int), res_dict[PG.GESTURE_LABEL]), axis=0)[:self.clip_len]
+        res_dict[PG.GESTURE_LABEL] = np.concatenate((np.zeros(self.LABEL_DELAY, dtype=int), res_dict[PG.GESTURE_LABEL]), axis=0)[:self.clip_len]
         return res_dict

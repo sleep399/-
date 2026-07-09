@@ -4,6 +4,11 @@ const App = {
   streamInterval: null,
   wsAlerts: null,
   wsStream: null,
+  streamBusy: false,
+  streamTimeout: null,
+  uploadedRecognitionVideo: null,
+  uploadedRecognitionResults: [],
+  uploadedLabelInterval: null,
 
   init() {
     this.bindTabs();
@@ -61,7 +66,7 @@ const App = {
   onViewChange(view) {
     if (view === 'dashboard') this.loadDashboard();
     if (view === 'lpr') { this.loadLprHistory(); }
-    if (view === 'police') { this.loadPoliceGestures(); this.loadPoliceHistory(); }
+    if (view === 'police') { this.ensurePolicePoseBackendControl(); this.loadPolicePoseBackend(); this.loadPoliceGestures(); this.loadPoliceHistory(); }
     if (view === 'owner') { this.loadOwnerGestures(); this.loadVehicleState(); }
     if (view === 'alerts') { this.loadAlerts(); this.connectAlertWs(); }
     if (view === 'logs') this.loadLogs();
@@ -195,22 +200,31 @@ const App = {
 
   async uploadFile(module, file) {
     if (!file) return;
-    const endpoints = { lpr: '/api/lpr/recognize', police: '/api/police-gesture/recognize', owner: '/api/owner-gesture/recognize' };
+    const isVideo = file.type.startsWith('video/') || /\.(mp4|avi|mov|mkv|webm|flv)$/i.test(file.name || '');
+    const imageEndpoints = { lpr: '/api/lpr/recognize', police: '/api/police-gesture/recognize', owner: '/api/owner-gesture/recognize' };
+    const videoEndpoints = { lpr: '/api/lpr/recognize-video', police: '/api/police-gesture/recognize-video', owner: '/api/owner-gesture/recognize-video' };
+    const endpoints = isVideo ? videoEndpoints : imageEndpoints;
     const form = new FormData();
     form.append('file', file);
     const headers = {};
     if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
     const previewMap = { lpr: 'lpr-preview', police: 'police-preview', owner: 'owner-preview' };
     const resultMap = { lpr: 'lpr-results', police: 'police-result', owner: 'owner-result' };
-    const preview = document.getElementById(previewMap[module]);
     const resultBox = document.getElementById(resultMap[module]);
-    if (preview && file.type.startsWith('image/')) preview.src = URL.createObjectURL(file);
-    if (resultBox) resultBox.innerHTML = '正在识别，请稍候...';
+    this.showUploadPreview(module, file, isVideo);
+    if (module === 'police' && isVideo) {
+      if (resultBox) resultBox.innerHTML = '正在随视频播放实时识别...';
+      this.startUploadedPoliceVideo();
+      return;
+    }
+    if (resultBox) resultBox.innerHTML = isVideo ? '正在抽帧识别，长视频会自动限量抽样...' : '正在识别，请稍候...';
     try {
-      const res = await fetch(endpoints[module], { method: 'POST', body: form, headers });
+      const endpoint = endpoints[module] + (isVideo && module === 'police' ? '?interval=1&max_results=300&max_sampled_frames=900' : '');
+      const res = await fetch(endpoint, { method: 'POST', body: form, headers });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || '识别失败');
-      this.renderResult(module, data);
+      if (isVideo) this.renderVideoResult(module, data);
+      else this.renderResult(module, data);
       if (module === 'owner' && data.action) this.loadVehicleState();
     } catch (e) {
       if (resultBox) resultBox.innerHTML = `识别失败：${e.message}`;
@@ -218,9 +232,176 @@ const App = {
     }
   },
 
+  showUploadPreview(module, file, isVideo) {
+    const imagePreview = document.getElementById(module + '-preview');
+    const videoPreview = document.getElementById(module + '-upload-preview');
+    const url = URL.createObjectURL(file);
+    if (isVideo) {
+      if (videoPreview) {
+        videoPreview.src = url;
+        videoPreview.hidden = false;
+      }
+      if (imagePreview) {
+        imagePreview.removeAttribute('src');
+        imagePreview.hidden = true;
+      }
+      return;
+    }
+
+    if (videoPreview) {
+      videoPreview.pause();
+      videoPreview.removeAttribute('src');
+      videoPreview.hidden = true;
+    }
+    if (imagePreview) {
+      imagePreview.src = url;
+      imagePreview.hidden = false;
+    }
+  },
+
+  showAnnotatedPreview(module, base64Image) {
+    const imagePreview = document.getElementById(module + '-preview');
+    if (!imagePreview || !base64Image) return;
+    imagePreview.src = 'data:image/jpeg;base64,' + base64Image;
+    imagePreview.hidden = false;
+  },
+
+  startUploadedPoliceVideo() {
+    this.stopStream();
+    const video = document.getElementById('police-upload-preview');
+    const canvas = document.getElementById('police-canvas');
+    const resultBox = document.getElementById('police-result');
+    if (!video || !canvas) return;
+    if (resultBox) resultBox.innerHTML = 'Preparing background recognition...';
+
+    this.streamModule = 'police';
+    this.streamBusy = false;
+    this.uploadedRecognitionResults = [];
+    const ctx = canvas.getContext('2d');
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    this.wsStream = new WebSocket(`${proto}://${location.host}/ws/stream/police`);
+    const sampleFps = 15;
+    const stepSeconds = 1 / sampleFps;
+    let nextTime = 0;
+    let processedFrames = 0;
+    const recognitionVideo = video;
+    this.uploadedRecognitionVideo = null;
+
+    const renderSynchronizedResult = (row) => {
+      if (!resultBox || !row) return;
+      resultBox.innerHTML = `${row.gesture_cn}<br><small>confidence ${(row.confidence * 100).toFixed(0)}%</small><br><small>video ${row.time_sec.toFixed(1)}s / recognized ${processedFrames} frames</small>`;
+    };
+
+    const updateStatus = () => {
+      if (!resultBox) return;
+      const duration = Number.isFinite(recognitionVideo.duration) ? recognitionVideo.duration : 0;
+      const current = Math.min(nextTime, duration || nextTime);
+      resultBox.dataset.status = `sampled ${processedFrames} frames`;
+      if (!this.uploadedRecognitionResults.length) resultBox.innerHTML = `Recognizing in background at ${sampleFps} FPS...<br><small>${current.toFixed(1)}s / ${duration ? duration.toFixed(1) : '?'}s</small>`;
+    };
+
+    const seekNextFrame = () => {
+      if (!this.streamModule || this.wsStream?.readyState !== WebSocket.OPEN) return;
+      const duration = Number.isFinite(recognitionVideo.duration) ? recognitionVideo.duration : 0;
+      if (duration && nextTime > duration) {
+        if (resultBox) resultBox.insertAdjacentHTML('beforeend', '<br><small>recognition finished</small>');
+        return;
+      }
+      if (video.paused && processedFrames > 0) {
+        if (resultBox) resultBox.insertAdjacentHTML('beforeend', '<br><small>paused</small>');
+        return;
+      }
+      recognitionVideo.pause();
+      updateStatus();
+      if (Math.abs(recognitionVideo.currentTime - nextTime) < 0.001 && recognitionVideo.readyState >= 2) {
+        sendCurrentFrame();
+        return;
+      }
+      const sendAfterData = () => {
+        if (Math.abs(recognitionVideo.currentTime - nextTime) < 0.001 && recognitionVideo.readyState >= 2) sendCurrentFrame();
+      };
+      recognitionVideo.addEventListener('loadeddata', sendAfterData, { once: true });
+      recognitionVideo.addEventListener('canplay', sendAfterData, { once: true });
+      recognitionVideo.currentTime = nextTime;
+    };
+
+    const sendCurrentFrame = () => {
+      if (!this.streamModule || recognitionVideo.readyState < 2 || this.streamBusy || this.wsStream?.readyState !== WebSocket.OPEN) return;
+      this.streamBusy = true;
+      canvas.width = recognitionVideo.videoWidth || 512;
+      canvas.height = recognitionVideo.videoHeight || 512;
+      ctx.drawImage(recognitionVideo, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.72);
+      this.wsStream.send(JSON.stringify({ type: 'frame', data: dataUrl.split(',')[1], time_sec: recognitionVideo.currentTime }));
+      this.streamTimeout = setTimeout(() => {
+        this.streamBusy = false;
+      }, 10000);
+    };
+
+    this.wsStream.onopen = () => {
+      recognitionVideo.onseeked = sendCurrentFrame;
+      video.pause();
+      video.onplay = () => setTimeout(seekNextFrame, 20);
+      video.onpause = () => {};
+      if (recognitionVideo.readyState >= 1) {
+        nextTime = 0;
+        seekNextFrame();
+      } else {
+        recognitionVideo.onloadedmetadata = () => {
+          nextTime = 0;
+          seekNextFrame();
+        };
+      }
+    };
+    this.wsStream.onmessage = (e) => {
+      if (this.streamTimeout) {
+        clearTimeout(this.streamTimeout);
+        this.streamTimeout = null;
+      }
+      this.streamBusy = false;
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'result') {
+        processedFrames += 1;
+        const row = { ...msg.data, time_sec: nextTime };
+        this.uploadedRecognitionResults.push(row);
+        video.currentTime = nextTime;
+        renderSynchronizedResult(row);
+        nextTime += stepSeconds;
+        setTimeout(seekNextFrame, 20);
+      }
+      if (msg.type === 'error' && resultBox) resultBox.innerHTML = `Video recognition error: ${msg.message}`;
+    };
+    this.wsStream.onerror = () => {
+      if (resultBox) resultBox.innerHTML = 'Realtime video recognition connection failed';
+    };
+  },
+
+  renderVideoResult(module, data) {
+    const resultMap = { lpr: 'lpr-results', police: 'police-result', owner: 'owner-result' };
+    const resultBox = document.getElementById(resultMap[module]);
+    const results = data.results || [];
+    const changes = data.changes || [];
+    const best = results.filter(r => r.success).sort((a, b) => (b.confidence || 0) - (a.confidence || 0))[0] || results[results.length - 1] || results[0];
+    const hitCount = data.result_count || 0;
+    const timeline = (changes.length ? changes : results).slice(0, 20).map(r => {
+      const t = r.time_sec == null ? `frame ${r.frame}` : `${Number(r.time_sec).toFixed(1)}s`;
+      return `<div class="history-item"><span>${t}</span><span>${r.gesture_cn || r.gesture} ${(r.confidence*100).toFixed(0)}%</span></div>`;
+    }).join('');
+    const summary = `<div class="result-banner ${hitCount ? 'success' : 'danger'}">
+      <div class="result-title">视频处理完成</div>
+      <div class="result-subtitle">抽样 ${data.sampled_frames || 0} 帧，命中 ${hitCount} 个有效手势，记录 ${changes.length || results.length} 次变化</div>
+    </div>
+    <div class="history-list">${timeline || '<p>未识别到动作变化</p>'}</div>`;
+    if (best) this.renderResult(module, best);
+    if (resultBox) {
+      if (best) resultBox.insertAdjacentHTML('afterbegin', summary);
+      else resultBox.innerHTML = summary;
+    }
+  },
+
   renderResult(module, data) {
     if (module === 'lpr') {
-      document.getElementById('lpr-preview').src = 'data:image/jpeg;base64,' + data.annotated_image;
+      this.showAnnotatedPreview('lpr', data.annotated_image);
       document.getElementById('lpr-results').innerHTML = `
         <div class="result-banner ${data.success ? 'success' : 'danger'}">
           <div class="result-title">${data.success ? '识别成功' : '未识别到有效车牌'}</div>
@@ -231,11 +412,11 @@ const App = {
       ).join('') || '<p>未检测到车牌</p>';
       this.loadLprHistory();
     } else if (module === 'police') {
-      document.getElementById('police-preview').src = 'data:image/jpeg;base64,' + data.annotated_image;
+      this.showAnnotatedPreview('police', data.annotated_image);
       document.getElementById('police-result').innerHTML = `${data.gesture_cn}<br><small>置信度 ${(data.confidence*100).toFixed(0)}%</small>`;
       this.loadPoliceHistory();
     } else if (module === 'owner') {
-      document.getElementById('owner-preview').src = 'data:image/jpeg;base64,' + data.annotated_image;
+      this.showAnnotatedPreview('owner', data.annotated_image);
       document.getElementById('owner-result').innerHTML = `${data.gesture_cn}${data.action ? '<br><small>→ ' + data.action + '</small>' : ''}`;
     }
   },
@@ -256,6 +437,56 @@ const App = {
         `<span class="gesture-tag">${g.cn}</span>`
       ).join('');
     } catch (e) {}
+  },
+
+  ensurePolicePoseBackendControl() {
+    if (document.getElementById('police-pose-backend')) return;
+    const streamUrlInput = document.getElementById('police-stream-url');
+    if (!streamUrlInput) return;
+    const row = document.createElement('div');
+    row.className = 'stream-url-row';
+    row.innerHTML = `
+      <select id="police-pose-backend">
+        <option value="ctpgr">CTPGR Pose</option>
+        <option value="yolo">YOLO-Pose</option>
+      </select>
+      <button class="btn" onclick="App.setPolicePoseBackend()">切换模型</button>
+      <span id="police-pose-backend-status" style="color:var(--text-muted);align-self:center"></span>
+    `;
+    streamUrlInput.closest('.stream-url-row')?.before(row);
+  },
+
+  async loadPolicePoseBackend() {
+    this.ensurePolicePoseBackendControl();
+    try {
+      const data = await this.api('/api/police-gesture/pose-backend');
+      const select = document.getElementById('police-pose-backend');
+      const status = document.getElementById('police-pose-backend-status');
+      if (select) select.value = data.backend || 'ctpgr';
+      if (status) status.textContent = data.backend === 'yolo' ? 'YOLO experimental' : 'stable';
+    } catch (e) {}
+  },
+
+  async setPolicePoseBackend() {
+    const select = document.getElementById('police-pose-backend');
+    const status = document.getElementById('police-pose-backend-status');
+    const backend = select?.value || 'ctpgr';
+    this.stopStream();
+    if (status) status.textContent = 'switching...';
+    try {
+      const data = await this.api('/api/police-gesture/pose-backend', {
+        method: 'PUT',
+        body: JSON.stringify({ backend }),
+      });
+      if (select) select.value = data.backend;
+      if (status) status.textContent = data.backend === 'yolo' ? 'YOLO experimental' : 'stable';
+      const resultBox = document.getElementById('police-result');
+      if (resultBox) resultBox.innerHTML = `当前模型：${data.backend === 'yolo' ? 'YOLO-Pose' : 'CTPGR Pose'}`;
+    } catch (e) {
+      if (status) status.textContent = 'failed';
+      alert(e.message);
+      this.loadPolicePoseBackend();
+    }
   },
 
   async loadPoliceHistory() {
@@ -322,31 +553,98 @@ const App = {
       const ctx = canvas.getContext('2d');
 
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      this.wsStream = new WebSocket(`${proto}://${location.host}/ws/stream/${module}`);
-      this.wsStream.onmessage = (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'result') this.renderResult(module, msg.data);
+      const openStreamSocket = () => {
+        if (!this.streamModule) return;
+        this.wsStream = new WebSocket(`${proto}://${location.host}/ws/stream/${module}`);
+        this.wsStream.onmessage = (e) => {
+          if (this.streamTimeout) {
+            clearTimeout(this.streamTimeout);
+            this.streamTimeout = null;
+          }
+          this.streamBusy = false;
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'result') this.renderResult(module, msg.data);
+        };
+        this.wsStream.onclose = () => {
+          if (this.streamTimeout) {
+            clearTimeout(this.streamTimeout);
+            this.streamTimeout = null;
+          }
+          this.streamBusy = false;
+        };
       };
+      openStreamSocket();
 
       this.streamInterval = setInterval(() => {
-        if (video.readyState >= 2 && this.wsStream?.readyState === WebSocket.OPEN) {
+        if (!this.streamModule) return;
+        if (!this.wsStream || this.wsStream.readyState === WebSocket.CLOSED) openStreamSocket();
+        if (video.readyState >= 2 && this.wsStream?.readyState === WebSocket.OPEN && !this.streamBusy) {
+          this.streamBusy = true;
           canvas.width = video.videoWidth;
           canvas.height = video.videoHeight;
           ctx.drawImage(video, 0, 0);
           const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
           this.wsStream.send(JSON.stringify({ type: 'frame', data: dataUrl.split(',')[1] }));
+          this.streamTimeout = setTimeout(() => {
+            this.streamBusy = false;
+            if (this.wsStream) this.wsStream.close();
+            this.wsStream = null;
+          }, 10000);
         }
-      }, 500);
+      }, 80);
     } catch (e) { alert('无法访问摄像头: ' + e.message); }
+  },
+
+  startUrlStream(module) {
+    this.stopStream();
+    const input = document.getElementById(module + '-stream-url');
+    const url = (input?.value || '').trim();
+    if (!url) {
+      alert('请输入 rtsp/http 视频流地址');
+      return;
+    }
+
+    this.streamModule = module;
+    const resultMap = { lpr: 'lpr-results', police: 'police-result', owner: 'owner-result' };
+    const resultBox = document.getElementById(resultMap[module]);
+    if (resultBox) resultBox.innerHTML = '正在连接视频流...';
+
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    this.wsStream = new WebSocket(`${proto}://${location.host}/ws/stream-url/${module}`);
+    this.wsStream.onopen = () => {
+      this.wsStream.send(JSON.stringify({ type: 'start', url, interval: 1 }));
+    };
+    this.wsStream.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'status' && resultBox) resultBox.innerHTML = '视频流已连接，正在识别...';
+      if (msg.type === 'result') this.renderResult(module, msg.data);
+      if (msg.type === 'error') {
+        if (resultBox) resultBox.innerHTML = `视频流错误：${msg.message}`;
+        else alert(msg.message);
+      }
+    };
+    this.wsStream.onerror = () => {
+      if (resultBox) resultBox.innerHTML = '视频流连接失败';
+    };
   },
 
   stopStream() {
     if (this.streamInterval) { clearInterval(this.streamInterval); this.streamInterval = null; }
+    if (this.streamTimeout) { clearTimeout(this.streamTimeout); this.streamTimeout = null; }
+    if (this.uploadedLabelInterval) { clearInterval(this.uploadedLabelInterval); this.uploadedLabelInterval = null; }
+    if (this.uploadedRecognitionVideo) {
+      this.uploadedRecognitionVideo.pause();
+      this.uploadedRecognitionVideo.removeAttribute('src');
+      this.uploadedRecognitionVideo.load();
+      this.uploadedRecognitionVideo = null;
+    }
+    this.uploadedRecognitionResults = [];
     if (this.wsStream) { this.wsStream.close(); this.wsStream = null; }
+    this.streamBusy = false;
     if (this.streamModule) {
       const video = document.getElementById(this.streamModule + '-video');
-      if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
-      video.hidden = true;
+      if (video?.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
+      if (video) video.hidden = true;
       this.streamModule = null;
     }
   },

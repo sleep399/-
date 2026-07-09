@@ -25,7 +25,7 @@ class GestureRecognitionModel(nn.Module):
 
     def load_ckpt(self, allow_new=True):
         if Path.is_file(self.ckpt_path):
-            checkpoint = torch.load(self.ckpt_path)
+            checkpoint = torch.load(self.ckpt_path, map_location=self.device)
             self.load_state_dict(checkpoint)
         else:
             if allow_new:

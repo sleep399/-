@@ -26,7 +26,7 @@ class AicAffinityField(AicGaussian):
         bones = np.array(aic_bones) - 1
         coord = np.take(heat_keypoints, bones, axis=1)  # Shape:(Person, Bone, Endpoint, X)
         map_PeBHW = [cv2.line(np.zeros(self.heat_size, dtype=np.uint8), (x1, y1), (x2, y2), 255, self.__paf_line_width)
-                       for x1, y1, x2, y2 in coord.reshape(-1, 4).astype(np.int)]
+                       for x1, y1, x2, y2 in coord.reshape(-1, 4).astype(int)]
         # To 0~1
         map_PeBHW = np.asarray(map_PeBHW, dtype=np.float32) / 255.
         map_PeBHW = map_PeBHW.reshape(coord.shape[0], coord.shape[1], self.heat_size[1], self.heat_size[0])

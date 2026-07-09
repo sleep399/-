@@ -34,7 +34,7 @@ class PgdLabel(Dataset):
         v_name = v_path.name
         v_path = str(v_path)
         label = [int(l) for l in label]
-        label = np.asarray(label, dtype=np.int)
+        label = np.asarray(label, dtype=int)
         return {PG.VIDEO_NAME: v_name, PG.VIDEO_PATH: v_path, PG.GESTURE_LABEL: label}
 
     @staticmethod
