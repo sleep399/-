@@ -47,7 +47,7 @@ class Player:
             cv2.imshow("Play saved keypoint results", img_kps)
             cv2.waitKey(duration)
         cap.release()
-        gestures = np.array(gestures, np.int)
+        gestures = np.array(gestures, int)
         res[PG.PRED_GESTURES] = gestures
         print('The prediction of video ', res[PG.VIDEO_NAME], ' is completed')
         return res

@@ -22,7 +22,7 @@ class PoseEstimationModel(nn.Module):
 
     def load_ckpt(self, allow_new=True):
         if Path.is_file(self.ckpt_path):
-            checkpoint = torch.load(self.ckpt_path)
+            checkpoint = torch.load(self.ckpt_path, map_location=self.device)
             self.load_state_dict(checkpoint)
             print('Pose model ckpt loaded.')
         else:

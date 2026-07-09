@@ -66,7 +66,7 @@ class AicNative(Dataset):
             visibilities.append(point_v)
 
         keypoints = np.array(keypoints, dtype=np.float32).reshape((num_people, num_joints, 2))
-        visibilities = np.array(visibilities, dtype=np.int).reshape((num_people, num_joints))
+        visibilities = np.array(visibilities, dtype=int).reshape((num_people, num_joints))
         boxes = np.array(boxes, dtype=np.float32).reshape((num_people, 4))
 
         return {HK.NATIVE_IMAGE: native_image, HK.BOXES: boxes, HK.KEYPOINTS: keypoints,

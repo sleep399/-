@@ -41,7 +41,7 @@ class HK(Enum):  # Human Keypoint
 
 class PG(Enum):  # Police Gesture
     VIDEO_PATH = auto()  # path of police gesture video
-    VIDEO_NAME = 'VIDEO_NAME'
+    VIDEO_NAME = auto()
     GESTURE_LABEL = auto()  # list of gestures corresponding to frames
 
     COORD_NATIVE = auto()  # native keypoint x,y (int)
@@ -54,4 +54,4 @@ class PG(Enum):  # Police Gesture
     OUT_SCORES = auto()  # prediction output scores, shape: (classes)
     OUT_ARGMAX = auto()  # predicted class, shape: (1)
 
-    PRED_GESTURES = 'PRED_GESTURES'  # Array of PG.OUT_ARGMAX
+    PRED_GESTURES = auto()  # Array of PG.OUT_ARGMAX
