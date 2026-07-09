@@ -52,7 +52,7 @@ async def ws_stream(websocket: WebSocket, module: str):
             if msg.get("type") == "frame":
                 try:
                     frame = _decode_jpeg_frame(msg["data"])
-                    if police_gesture_service.pose_backend != "yolo" and sequence_state is None:
+                    if sequence_state is None:
                         sequence_state = police_gesture_service.create_sequence_state()
                     result = await _run_blocking(police_gesture_service.recognize_frame_continuous, frame, sequence_state)
                     await websocket.send_json({
@@ -110,7 +110,7 @@ async def ws_stream_url(websocket: WebSocket, module: str):
             now = time.monotonic()
             if frame_index % interval == 0 and now - last_processed_at >= min_frame_gap:
                 last_processed_at = now
-                if police_gesture_service.pose_backend != "yolo" and sequence_state is None:
+                if sequence_state is None:
                     sequence_state = police_gesture_service.create_sequence_state()
                 result = await _run_blocking(police_gesture_service.recognize_frame_continuous, frame, sequence_state)
                 await websocket.send_json({

@@ -348,52 +348,6 @@ class PoliceGestureService:
     def _no_gesture_payload(self, ctpgr_image: np.ndarray, reason: str | None = None) -> dict[str, Any]:
         return self._plain_payload(ctpgr_image, 0, 1.0, None, reason)
 
-    def _classify_yolo_coord(self, ctpgr_image: np.ndarray, coord_norm: np.ndarray) -> dict[str, Any]:
-        coord = coord_norm[0] if coord_norm.ndim == 3 else coord_norm
-        if coord.shape[0] == 2:
-            pts = coord.T
-        else:
-            pts = coord
-
-        right_shoulder, right_elbow, right_wrist = pts[0], pts[1], pts[2]
-        left_shoulder, left_elbow, left_wrist = pts[3], pts[4], pts[5]
-        head_top, neck = pts[12], pts[13]
-        shoulder_width = float(np.linalg.norm(left_shoulder - right_shoulder))
-        if shoulder_width < 0.04:
-            return self._plain_payload(ctpgr_image, 0, 0.8, coord_norm, "yolo shoulders too close")
-
-        def horizontal(shoulder: np.ndarray, wrist: np.ndarray) -> bool:
-            return abs(float(wrist[1] - shoulder[1])) < shoulder_width * 0.55 and abs(float(wrist[0] - shoulder[0])) > shoulder_width * 0.75
-
-        def raised(shoulder: np.ndarray, elbow: np.ndarray, wrist: np.ndarray) -> bool:
-            return float(wrist[1]) < float(head_top[1]) + shoulder_width * 0.25 and float(elbow[1]) < float(shoulder[1])
-
-        def lowered(wrist: np.ndarray) -> bool:
-            return float(wrist[1]) > float(neck[1]) + shoulder_width * 1.2
-
-        left_horizontal = horizontal(left_shoulder, left_wrist)
-        right_horizontal = horizontal(right_shoulder, right_wrist)
-        left_raised = raised(left_shoulder, left_elbow, left_wrist)
-        right_raised = raised(right_shoulder, right_elbow, right_wrist)
-        left_lowered = lowered(left_wrist)
-        right_lowered = lowered(right_wrist)
-
-        if left_raised or right_raised:
-            return self._plain_payload(ctpgr_image, 1, 0.82, coord_norm)
-        if left_horizontal and right_horizontal:
-            return self._plain_payload(ctpgr_image, 2, 0.78, coord_norm)
-        if left_horizontal and right_lowered:
-            return self._plain_payload(ctpgr_image, 5, 0.68, coord_norm)
-        if right_horizontal and left_lowered:
-            return self._plain_payload(ctpgr_image, 3, 0.68, coord_norm)
-        if left_horizontal:
-            return self._plain_payload(ctpgr_image, 5, 0.6, coord_norm)
-        if right_horizontal:
-            return self._plain_payload(ctpgr_image, 3, 0.6, coord_norm)
-        if left_lowered != right_lowered:
-            return self._plain_payload(ctpgr_image, 7, 0.55, coord_norm)
-        return self._plain_payload(ctpgr_image, 0, 0.75, coord_norm)
-
     def _coord_from_prepared_image(self, ctpgr_image: np.ndarray) -> np.ndarray:
         if self.pose_backend == "yolo":
             return self._coord_from_yolo_pose(ctpgr_image)
@@ -427,7 +381,17 @@ class PoliceGestureService:
                 coord_norm = self._coord_from_yolo_pose(ctpgr_image)
             except ValueError as exc:
                 return self._no_gesture_payload(ctpgr_image, str(exc))
-            return self._classify_yolo_coord(ctpgr_image, coord_norm)
+            state = self.create_sequence_state()
+            sequence_results = []
+            for _ in range(self.sequence_steps):
+                sequence_results.append(self._classify_coord(coord_norm, state))
+            tail = sequence_results[-8:]
+            nonzero_tail = [r for r in tail if int(r[self.pg.OUT_ARGMAX]) > 0]
+            if nonzero_tail:
+                result = max(nonzero_tail, key=lambda r: self._confidence(r[self.pg.OUT_SCORES], int(r[self.pg.OUT_ARGMAX])))
+            else:
+                result = sequence_results[-1]
+            return self._result_payload(ctpgr_image, result)
 
         coord_norm = self._coord_from_prepared_image(ctpgr_image)
         state = self.create_sequence_state()
@@ -450,7 +414,8 @@ class PoliceGestureService:
                 coord_norm = self._coord_from_yolo_pose(ctpgr_image)
             except ValueError as exc:
                 return self._no_gesture_payload(ctpgr_image, str(exc))
-            return self._classify_yolo_coord(ctpgr_image, coord_norm)
+            result = self._classify_coord(coord_norm, state)
+            return self._result_payload(ctpgr_image, result)
 
         coord_norm = self._coord_from_prepared_image(ctpgr_image)
         result = self._classify_coord(coord_norm, state)
