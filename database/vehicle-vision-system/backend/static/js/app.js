@@ -571,16 +571,99 @@ const App = {
     this.updateVehicle();
   },
 
+  async ensureCameraSelector(module) {
+    if (document.getElementById(module + '-camera-device')) return;
+    const streamUrlRow = document.getElementById(module + '-stream-url')?.closest('.stream-url-row');
+    if (!streamUrlRow) return;
+    const row = document.createElement('div');
+    row.className = 'camera-device-row';
+    row.innerHTML = `
+      <select id="${module}-camera-device">
+        <option value="">默认摄像头</option>
+      </select>
+      <button class="btn" type="button" onclick="App.refreshCameraDevices('${module}')">刷新摄像头</button>
+    `;
+    streamUrlRow.parentNode.insertBefore(row, streamUrlRow);
+    await this.refreshCameraDevices(module);
+  },
+
+  async refreshCameraDevices(module) {
+    const select = document.getElementById(module + '-camera-device');
+    if (!select || !navigator.mediaDevices?.enumerateDevices) return;
+    const current = select.value;
+    const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+    const cameras = devices.filter(d => d.kind === 'videoinput');
+    select.innerHTML = '<option value="">默认摄像头</option>' + cameras.map((d, i) =>
+      `<option value="${d.deviceId}">${d.label || `摄像头 ${i + 1}`}</option>`
+    ).join('');
+    if (current && cameras.some(d => d.deviceId === current)) select.value = current;
+  },
+
+  cameraErrorMessage(error) {
+    const name = error?.name || '';
+    const detail = error?.message || String(error || '');
+    if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+      return '浏览器没有摄像头权限，请在地址栏左侧允许摄像头权限后刷新页面。';
+    }
+    if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+      return '没有找到可用摄像头，请确认摄像头已连接并被系统识别。';
+    }
+    if (name === 'NotReadableError' || /Could not start video source/i.test(detail)) {
+      return '摄像头无法启动，通常是被微信、腾讯会议、系统相机、浏览器其它标签页占用了。请关闭占用摄像头的软件后重试。';
+    }
+    if (name === 'OverconstrainedError' || name === 'ConstraintNotSatisfiedError') {
+      return '当前摄像头不支持请求的分辨率或帧率，已尝试降级仍失败。';
+    }
+    if (!window.isSecureContext) {
+      return '当前页面不是安全上下文。请使用 localhost、127.0.0.1 或 https 访问。';
+    }
+    return `无法访问摄像头：${detail}`;
+  },
+
+  async openCameraStream(module) {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('当前浏览器不支持 getUserMedia 摄像头接口');
+    }
+    await this.ensureCameraSelector(module);
+    const selectedDevice = document.getElementById(module + '-camera-device')?.value || '';
+    const baseVideo = {
+      width: { ideal: 640 },
+      height: { ideal: 480 },
+      frameRate: { ideal: 15, max: 15 },
+    };
+    const attempts = [];
+    if (selectedDevice) attempts.push({ video: { ...baseVideo, deviceId: { exact: selectedDevice } }, audio: false });
+    attempts.push({ video: { ...baseVideo, facingMode: { ideal: 'environment' } }, audio: false });
+    attempts.push({ video: baseVideo, audio: false });
+    attempts.push({ video: true, audio: false });
+
+    let lastError = null;
+    for (const constraints of attempts) {
+      try {
+        return await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError || new Error('摄像头启动失败');
+  },
+
   async startStream(module) {
     this.stopStream();
     this.streamModule = module;
     const video = document.getElementById(module + '-video');
     const canvas = document.getElementById(module + '-canvas');
+    const resultMap = { lpr: 'lpr-results', police: 'police-result', owner: 'owner-result' };
+    const resultBox = document.getElementById(resultMap[module]);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const stream = await this.openCameraStream(module);
       video.srcObject = stream;
+      video.muted = true;
+      video.playsInline = true;
       video.hidden = false;
       canvas.hidden = false;
+      await video.play().catch(() => {});
+      await this.refreshCameraDevices(module);
       const ctx = canvas.getContext('2d');
 
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -595,6 +678,7 @@ const App = {
           this.streamBusy = false;
           const msg = JSON.parse(e.data);
           if (msg.type === 'result') this.renderResult(module, msg.data);
+          if (msg.type === 'frame_error' && resultBox) resultBox.innerHTML = `摄像头帧识别失败：${msg.message}`;
         };
         this.wsStream.onclose = () => {
           if (this.streamTimeout) {
@@ -623,7 +707,12 @@ const App = {
           }, 10000);
         }
       }, 67);
-    } catch (e) { alert('无法访问摄像头: ' + e.message); }
+    } catch (e) {
+      this.stopStream();
+      const message = this.cameraErrorMessage(e);
+      if (resultBox) resultBox.innerHTML = message;
+      alert(message);
+    }
   },
 
   startUrlStream(module) {
