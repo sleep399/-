@@ -255,9 +255,10 @@ class PoliceGestureService:
         left_ankle = pick(15)
 
         shoulder_points = np.stack([right_shoulder, left_shoulder])
-        neck = np.nanmean(shoulder_points, axis=0)
-        if np.isnan(neck).any():
+        valid_shoulders = shoulder_points[~np.isnan(shoulder_points).any(axis=1)]
+        if len(valid_shoulders) == 0:
             raise ValueError("YOLO pose shoulders are not reliable enough")
+        neck = np.nanmean(valid_shoulders, axis=0)
 
         head_candidates = np.stack([pick(0), pick(1), pick(2), pick(3), pick(4)])
         valid_head = head_candidates[~np.isnan(head_candidates).any(axis=1)]
@@ -315,6 +316,38 @@ class PoliceGestureService:
             "success": gesture_id > 0,
         }
 
+    def _plain_payload(
+        self,
+        ctpgr_image: np.ndarray,
+        gesture_id: int,
+        confidence: float,
+        coord_norm: np.ndarray | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        annotated = ctpgr_image.copy()
+        keypoints = []
+        if coord_norm is not None:
+            keypoints = self._extract_keypoints(coord_norm)
+            self._draw_skeleton(annotated, keypoints)
+        en, cn = POLICE_GESTURES.get(gesture_id, POLICE_GESTURES[0])
+        cv2.putText(annotated, f"{en} ({confidence:.0%})", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+        payload = {
+            "gesture": en,
+            "gesture_cn": cn,
+            "gesture_id": gesture_id,
+            "confidence": round(float(confidence), 3),
+            "pose_backend": self.pose_backend,
+            "keypoints": keypoints,
+            "annotated_image": ndarray_to_base64(annotated),
+            "success": gesture_id > 0,
+        }
+        if reason:
+            payload["reason"] = reason
+        return payload
+
+    def _no_gesture_payload(self, ctpgr_image: np.ndarray, reason: str | None = None) -> dict[str, Any]:
+        return self._plain_payload(ctpgr_image, 0, 1.0, None, reason)
+
     def _coord_from_prepared_image(self, ctpgr_image: np.ndarray) -> np.ndarray:
         if self.pose_backend == "yolo":
             return self._coord_from_yolo_pose(ctpgr_image)
@@ -343,6 +376,23 @@ class PoliceGestureService:
         return {self.pg.OUT_ARGMAX: int(np.argmax(scores)), self.pg.OUT_SCORES: scores, self.pg.COORD_NORM: coord_norm}
 
     def _classify_prepared_image(self, ctpgr_image: np.ndarray) -> dict[str, Any]:
+        if self.pose_backend == "yolo":
+            try:
+                coord_norm = self._coord_from_yolo_pose(ctpgr_image)
+            except ValueError as exc:
+                return self._no_gesture_payload(ctpgr_image, str(exc))
+            state = self.create_sequence_state()
+            sequence_results = []
+            for _ in range(self.sequence_steps):
+                sequence_results.append(self._classify_coord(coord_norm, state))
+            tail = sequence_results[-8:]
+            nonzero_tail = [r for r in tail if int(r[self.pg.OUT_ARGMAX]) > 0]
+            if nonzero_tail:
+                result = max(nonzero_tail, key=lambda r: self._confidence(r[self.pg.OUT_SCORES], int(r[self.pg.OUT_ARGMAX])))
+            else:
+                result = sequence_results[-1]
+            return self._result_payload(ctpgr_image, result)
+
         coord_norm = self._coord_from_prepared_image(ctpgr_image)
         state = self.create_sequence_state()
 
@@ -359,6 +409,14 @@ class PoliceGestureService:
         return self._result_payload(ctpgr_image, result)
 
     def recognize_prepared_frame_continuous(self, ctpgr_image: np.ndarray, state: dict[str, torch.Tensor] | None = None) -> dict[str, Any]:
+        if self.pose_backend == "yolo":
+            try:
+                coord_norm = self._coord_from_yolo_pose(ctpgr_image)
+            except ValueError as exc:
+                return self._no_gesture_payload(ctpgr_image, str(exc))
+            result = self._classify_coord(coord_norm, state)
+            return self._result_payload(ctpgr_image, result)
+
         coord_norm = self._coord_from_prepared_image(ctpgr_image)
         result = self._classify_coord(coord_norm, state)
         return self._result_payload(ctpgr_image, result)

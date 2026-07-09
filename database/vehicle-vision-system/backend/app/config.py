@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     low_confidence_threshold: float = 0.4
     police_pose_backend: str = "ctpgr"
     police_yolo_pose_model: str = "yolov8n-pose.pt"
-    police_yolo_keypoint_conf: float = 0.25
+    police_yolo_keypoint_conf: float = 0.15
 
     class Config:
         env_file = ".env"
