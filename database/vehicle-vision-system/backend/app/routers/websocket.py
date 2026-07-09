@@ -45,19 +45,29 @@ async def ws_stream(websocket: WebSocket, module: str):
         await websocket.send_json({"type": "error", "message": "only police module is enabled"})
         await websocket.close()
         return
-    sequence_state = police_gesture_service.create_sequence_state()
+    sequence_state = None
     try:
         while True:
             msg = json.loads(await websocket.receive_text())
             if msg.get("type") == "frame":
-                frame = _decode_jpeg_frame(msg["data"])
-                result = await _run_blocking(police_gesture_service.recognize_frame_continuous, frame, sequence_state)
-                await websocket.send_json({
-                    "type": "result",
-                    "module": module,
-                    "time_sec": msg.get("time_sec"),
-                    "data": result,
-                })
+                try:
+                    frame = _decode_jpeg_frame(msg["data"])
+                    if police_gesture_service.pose_backend != "yolo" and sequence_state is None:
+                        sequence_state = police_gesture_service.create_sequence_state()
+                    result = await _run_blocking(police_gesture_service.recognize_frame_continuous, frame, sequence_state)
+                    await websocket.send_json({
+                        "type": "result",
+                        "module": module,
+                        "time_sec": msg.get("time_sec"),
+                        "data": result,
+                    })
+                except Exception as exc:
+                    await websocket.send_json({
+                        "type": "frame_error",
+                        "module": module,
+                        "time_sec": msg.get("time_sec"),
+                        "message": str(exc),
+                    })
             elif msg.get("type") == "ping":
                 await websocket.send_json({"type": "pong"})
     except WebSocketDisconnect:
@@ -83,7 +93,7 @@ async def ws_stream_url(websocket: WebSocket, module: str):
         interval = max(1, min(int(start_msg.get("interval", 1)), 120))
         target_fps = max(1.0, min(float(start_msg.get("target_fps", 15)), 15.0))
         min_frame_gap = 1.0 / target_fps
-        sequence_state = police_gesture_service.create_sequence_state()
+        sequence_state = None
         cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if not cap.isOpened():
@@ -100,6 +110,8 @@ async def ws_stream_url(websocket: WebSocket, module: str):
             now = time.monotonic()
             if frame_index % interval == 0 and now - last_processed_at >= min_frame_gap:
                 last_processed_at = now
+                if police_gesture_service.pose_backend != "yolo" and sequence_state is None:
+                    sequence_state = police_gesture_service.create_sequence_state()
                 result = await _run_blocking(police_gesture_service.recognize_frame_continuous, frame, sequence_state)
                 await websocket.send_json({
                     "type": "result",

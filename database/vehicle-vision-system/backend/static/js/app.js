@@ -397,6 +397,9 @@ const App = {
         lastResultAt = row.time_sec;
         renderSynchronizedResult(row);
       }
+      if (msg.type === 'frame_error' && resultBox && !this.uploadedRecognitionResults.length) {
+        resultBox.innerHTML = `YOLO等待有效人体关键点...<br><small>${msg.message || 'frame skipped'}</small>`;
+      }
       if (msg.type === 'error' && resultBox) resultBox.innerHTML = `Video recognition error: ${msg.message}`;
     };
     this.wsStream.onerror = () => {

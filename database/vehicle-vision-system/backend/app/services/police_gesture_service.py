@@ -255,9 +255,10 @@ class PoliceGestureService:
         left_ankle = pick(15)
 
         shoulder_points = np.stack([right_shoulder, left_shoulder])
-        neck = np.nanmean(shoulder_points, axis=0)
-        if np.isnan(neck).any():
+        valid_shoulders = shoulder_points[~np.isnan(shoulder_points).any(axis=1)]
+        if len(valid_shoulders) == 0:
             raise ValueError("YOLO pose shoulders are not reliable enough")
+        neck = np.nanmean(valid_shoulders, axis=0)
 
         head_candidates = np.stack([pick(0), pick(1), pick(2), pick(3), pick(4)])
         valid_head = head_candidates[~np.isnan(head_candidates).any(axis=1)]
@@ -315,6 +316,84 @@ class PoliceGestureService:
             "success": gesture_id > 0,
         }
 
+    def _plain_payload(
+        self,
+        ctpgr_image: np.ndarray,
+        gesture_id: int,
+        confidence: float,
+        coord_norm: np.ndarray | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        annotated = ctpgr_image.copy()
+        keypoints = []
+        if coord_norm is not None:
+            keypoints = self._extract_keypoints(coord_norm)
+            self._draw_skeleton(annotated, keypoints)
+        en, cn = POLICE_GESTURES.get(gesture_id, POLICE_GESTURES[0])
+        cv2.putText(annotated, f"{en} ({confidence:.0%})", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+        payload = {
+            "gesture": en,
+            "gesture_cn": cn,
+            "gesture_id": gesture_id,
+            "confidence": round(float(confidence), 3),
+            "pose_backend": self.pose_backend,
+            "keypoints": keypoints,
+            "annotated_image": ndarray_to_base64(annotated),
+            "success": gesture_id > 0,
+        }
+        if reason:
+            payload["reason"] = reason
+        return payload
+
+    def _no_gesture_payload(self, ctpgr_image: np.ndarray, reason: str | None = None) -> dict[str, Any]:
+        return self._plain_payload(ctpgr_image, 0, 1.0, None, reason)
+
+    def _classify_yolo_coord(self, ctpgr_image: np.ndarray, coord_norm: np.ndarray) -> dict[str, Any]:
+        coord = coord_norm[0] if coord_norm.ndim == 3 else coord_norm
+        if coord.shape[0] == 2:
+            pts = coord.T
+        else:
+            pts = coord
+
+        right_shoulder, right_elbow, right_wrist = pts[0], pts[1], pts[2]
+        left_shoulder, left_elbow, left_wrist = pts[3], pts[4], pts[5]
+        head_top, neck = pts[12], pts[13]
+        shoulder_width = float(np.linalg.norm(left_shoulder - right_shoulder))
+        if shoulder_width < 0.04:
+            return self._plain_payload(ctpgr_image, 0, 0.8, coord_norm, "yolo shoulders too close")
+
+        def horizontal(shoulder: np.ndarray, wrist: np.ndarray) -> bool:
+            return abs(float(wrist[1] - shoulder[1])) < shoulder_width * 0.55 and abs(float(wrist[0] - shoulder[0])) > shoulder_width * 0.75
+
+        def raised(shoulder: np.ndarray, elbow: np.ndarray, wrist: np.ndarray) -> bool:
+            return float(wrist[1]) < float(head_top[1]) + shoulder_width * 0.25 and float(elbow[1]) < float(shoulder[1])
+
+        def lowered(wrist: np.ndarray) -> bool:
+            return float(wrist[1]) > float(neck[1]) + shoulder_width * 1.2
+
+        left_horizontal = horizontal(left_shoulder, left_wrist)
+        right_horizontal = horizontal(right_shoulder, right_wrist)
+        left_raised = raised(left_shoulder, left_elbow, left_wrist)
+        right_raised = raised(right_shoulder, right_elbow, right_wrist)
+        left_lowered = lowered(left_wrist)
+        right_lowered = lowered(right_wrist)
+
+        if left_raised or right_raised:
+            return self._plain_payload(ctpgr_image, 1, 0.82, coord_norm)
+        if left_horizontal and right_horizontal:
+            return self._plain_payload(ctpgr_image, 2, 0.78, coord_norm)
+        if left_horizontal and right_lowered:
+            return self._plain_payload(ctpgr_image, 5, 0.68, coord_norm)
+        if right_horizontal and left_lowered:
+            return self._plain_payload(ctpgr_image, 3, 0.68, coord_norm)
+        if left_horizontal:
+            return self._plain_payload(ctpgr_image, 5, 0.6, coord_norm)
+        if right_horizontal:
+            return self._plain_payload(ctpgr_image, 3, 0.6, coord_norm)
+        if left_lowered != right_lowered:
+            return self._plain_payload(ctpgr_image, 7, 0.55, coord_norm)
+        return self._plain_payload(ctpgr_image, 0, 0.75, coord_norm)
+
     def _coord_from_prepared_image(self, ctpgr_image: np.ndarray) -> np.ndarray:
         if self.pose_backend == "yolo":
             return self._coord_from_yolo_pose(ctpgr_image)
@@ -343,6 +422,13 @@ class PoliceGestureService:
         return {self.pg.OUT_ARGMAX: int(np.argmax(scores)), self.pg.OUT_SCORES: scores, self.pg.COORD_NORM: coord_norm}
 
     def _classify_prepared_image(self, ctpgr_image: np.ndarray) -> dict[str, Any]:
+        if self.pose_backend == "yolo":
+            try:
+                coord_norm = self._coord_from_yolo_pose(ctpgr_image)
+            except ValueError as exc:
+                return self._no_gesture_payload(ctpgr_image, str(exc))
+            return self._classify_yolo_coord(ctpgr_image, coord_norm)
+
         coord_norm = self._coord_from_prepared_image(ctpgr_image)
         state = self.create_sequence_state()
 
@@ -359,6 +445,13 @@ class PoliceGestureService:
         return self._result_payload(ctpgr_image, result)
 
     def recognize_prepared_frame_continuous(self, ctpgr_image: np.ndarray, state: dict[str, torch.Tensor] | None = None) -> dict[str, Any]:
+        if self.pose_backend == "yolo":
+            try:
+                coord_norm = self._coord_from_yolo_pose(ctpgr_image)
+            except ValueError as exc:
+                return self._no_gesture_payload(ctpgr_image, str(exc))
+            return self._classify_yolo_coord(ctpgr_image, coord_norm)
+
         coord_norm = self._coord_from_prepared_image(ctpgr_image)
         result = self._classify_coord(coord_norm, state)
         return self._result_payload(ctpgr_image, result)
