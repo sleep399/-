@@ -81,7 +81,7 @@ async def ws_stream_url(websocket: WebSocket, module: str):
         start_msg = json.loads(await websocket.receive_text())
         url = validate_stream_url(start_msg.get("url", ""))
         interval = max(1, min(int(start_msg.get("interval", 1)), 120))
-        target_fps = max(1.0, min(float(start_msg.get("target_fps", 8)), 15.0))
+        target_fps = max(1.0, min(float(start_msg.get("target_fps", 15)), 15.0))
         min_frame_gap = 1.0 / target_fps
         sequence_state = police_gesture_service.create_sequence_state()
         cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)

@@ -315,7 +315,7 @@ const App = {
     const ctx = canvas.getContext('2d');
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     this.wsStream = new WebSocket(`${proto}://${location.host}/ws/stream/police`);
-    const sampleFps = 8;
+    const sampleFps = 15;
     const sampleMs = 1000 / sampleFps;
     let processedFrames = 0;
     let lastSentAt = 0;
@@ -619,7 +619,7 @@ const App = {
             this.wsStream = null;
           }, 10000);
         }
-      }, 125);
+      }, 67);
     } catch (e) { alert('无法访问摄像头: ' + e.message); }
   },
 
@@ -640,7 +640,7 @@ const App = {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     this.wsStream = new WebSocket(`${proto}://${location.host}/ws/stream-url/${module}`);
     this.wsStream.onopen = () => {
-      this.wsStream.send(JSON.stringify({ type: 'start', url, interval: 1, target_fps: 8 }));
+      this.wsStream.send(JSON.stringify({ type: 'start', url, interval: 1, target_fps: 15 }));
     };
     this.wsStream.onmessage = (e) => {
       const msg = JSON.parse(e.data);
