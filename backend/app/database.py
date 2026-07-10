@@ -31,12 +31,8 @@ class Base(DeclarativeBase):
 
 
 def get_db():
-    from app.services.alert_agent import alert_agent
-
     db = SessionLocal()
     try:
-        db.execute(text("SELECT 1"))
-        alert_agent.record_db_connection(True)
         yield db
     except Exception:
         alert_agent.record_db_connection(False)
@@ -130,4 +126,3 @@ def init_db():
     from app.models import user, records, logs, alerts  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
-    _migrate_schema()
