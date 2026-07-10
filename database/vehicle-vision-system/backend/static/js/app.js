@@ -347,11 +347,19 @@ const App = {
   showPoliceUploadPreview(file, isVideo) {
     const imagePreview = document.getElementById('police-preview');
     const videoPreview = document.getElementById('police-upload-preview');
-    const videoWrap = document.getElementById('police-upload-wrap');
+    const cameraVideo = document.getElementById('police-video');
+    const streamPreview = document.getElementById('police-stream-preview');
+    const canvas = document.getElementById('police-canvas');
     const controls = document.getElementById('police-upload-controls');
     const playButton = document.getElementById('police-upload-play');
     const url = URL.createObjectURL(file);
     if (isVideo) {
+      if (cameraVideo) cameraVideo.hidden = true;
+      if (canvas) canvas.hidden = true;
+      if (streamPreview) {
+        streamPreview.removeAttribute('src');
+        streamPreview.hidden = true;
+      }
       if (videoPreview) {
         videoPreview.pause();
         videoPreview.src = url;
@@ -361,7 +369,6 @@ const App = {
         videoPreview.hidden = false;
         videoPreview.load();
       }
-      if (videoWrap) videoWrap.classList.remove('hidden');
       if (controls) controls.hidden = false;
       if (playButton) playButton.textContent = '播放视频';
       if (imagePreview) {
@@ -376,7 +383,10 @@ const App = {
       videoPreview.removeAttribute('src');
       videoPreview.hidden = true;
     }
-    if (videoWrap) videoWrap.classList.add('hidden');
+    if (streamPreview) {
+      streamPreview.removeAttribute('src');
+      streamPreview.hidden = true;
+    }
     if (controls) controls.hidden = true;
     if (imagePreview) {
       imagePreview.src = url;
@@ -389,6 +399,18 @@ const App = {
     if (!imagePreview || !base64Image) return;
     imagePreview.src = 'data:image/jpeg;base64,' + base64Image;
     imagePreview.hidden = false;
+  },
+
+  showPoliceRecognitionFrame(base64Image) {
+    const streamPreview = document.getElementById('police-stream-preview');
+    const imagePreview = document.getElementById('police-preview');
+    if (!streamPreview || !base64Image) return;
+    streamPreview.src = 'data:image/jpeg;base64,' + base64Image;
+    streamPreview.hidden = false;
+    if (imagePreview) {
+      imagePreview.removeAttribute('src');
+      imagePreview.hidden = true;
+    }
   },
 
   async toggleUploadedPolicePlayback() {
@@ -433,7 +455,7 @@ const App = {
 
     const renderSynchronizedResult = (row) => {
       if (!resultBox || !row) return;
-      if (row.annotated_image) this.showAnnotatedPreview('police', row.annotated_image);
+      if (row.annotated_image) this.showPoliceRecognitionFrame(row.annotated_image);
       const now = Number.isFinite(video.currentTime) ? video.currentTime : row.time_sec;
       const lag = Math.max(0, now - row.time_sec);
       resultBox.innerHTML = `${row.gesture_cn}<br><small>置信度 ${(row.confidence * 100).toFixed(0)}%</small><br><small>video ${now.toFixed(1)}s / label ${row.time_sec.toFixed(1)}s / lag ${lag.toFixed(1)}s</small>`;
@@ -597,7 +619,7 @@ const App = {
         this.loadDashboard();
       }
     } else if (module === 'police') {
-      document.getElementById('police-preview').src = 'data:image/jpeg;base64,' + data.annotated_image;
+      this.showPoliceRecognitionFrame(data.annotated_image);
       document.getElementById('police-result').innerHTML = `${data.gesture_cn}<br><small>置信度 ${(data.confidence*100).toFixed(0)}%</small>`;
       this.loadPoliceHistory();
     } else if (module === 'owner') {

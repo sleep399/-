@@ -392,6 +392,7 @@ h2 {
 .police-input-panel .gesture-ref { margin-top: .75rem; }
 .police-camera-wrap { min-height: 220px; }
 .police-camera-wrap #police-video,
+.police-camera-wrap #police-upload-preview,
 .police-camera-wrap #police-canvas,
 .police-camera-wrap #police-stream-preview {
   position: absolute;
@@ -400,8 +401,7 @@ h2 {
   height: 100%;
   object-fit: contain;
 }
-.police-preview-wrap .preview-img,
-.police-upload-wrap .preview-img {
+.police-preview-wrap .preview-img {
   margin-bottom: 0;
   width: 100%;
   max-height: 240px;
@@ -410,10 +410,8 @@ h2 {
   background: #0a0e17;
   border-radius: 8px;
 }
-.police-preview-wrap,
-.police-upload-wrap { margin-bottom: .75rem; }
+.police-preview-wrap { margin-bottom: .75rem; }
 .police-preview-wrap:has(#police-preview[hidden]) { display: none; }
-.police-upload-wrap.hidden { display: none; }
 .police-result-panel .gesture-result {
   text-align: left;
   font-size: 1rem;
