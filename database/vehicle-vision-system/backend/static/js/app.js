@@ -931,6 +931,7 @@ const App = {
         }
       };
 
+      const frameIntervalMs = module === 'police' ? 80 : 500;
       this.streamInterval = setInterval(() => {
         if (video.readyState >= 2 && this.wsStream?.readyState === WebSocket.OPEN && !this.streamBusy) {
           this.streamBusy = true;
@@ -940,7 +941,7 @@ const App = {
           const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
           this.wsStream.send(JSON.stringify({ type: 'frame', data: dataUrl.split(',')[1] }));
         }
-      }, 500);
+      }, frameIntervalMs);
     } catch (e) {
       this.stopStream();
       const message = module === 'police' ? this.cameraErrorMessage(e) : ('无法访问摄像头: ' + e.message);
