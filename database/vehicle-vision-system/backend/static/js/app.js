@@ -877,6 +877,11 @@ const App = {
     const video = document.getElementById(module + '-video');
     const canvas = document.getElementById(module + '-canvas');
     try {
+      const streamPreview = module === 'police' ? document.getElementById('police-stream-preview') : null;
+      if (streamPreview) {
+        streamPreview.hidden = true;
+        streamPreview.removeAttribute('src');
+      }
       const stream = module === 'police'
         ? await this.openPoliceCameraStream()
         : await navigator.mediaDevices.getUserMedia({ video: true });
@@ -937,6 +942,15 @@ const App = {
     const resultMap = { lpr: 'lpr-results', police: 'police-result', owner: 'owner-result' };
     const resultBox = document.getElementById(resultMap[module]);
     if (resultBox) resultBox.innerHTML = '正在连接视频流...';
+    const streamPreview = module === 'police' ? document.getElementById('police-stream-preview') : null;
+    if (streamPreview) {
+      const video = document.getElementById('police-video');
+      const canvas = document.getElementById('police-canvas');
+      if (video) video.hidden = true;
+      if (canvas) canvas.hidden = true;
+      streamPreview.hidden = false;
+      streamPreview.removeAttribute('src');
+    }
 
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     this.wsStream = new WebSocket(`${proto}://${location.host}/ws/stream-url/${module}`);
@@ -946,7 +960,13 @@ const App = {
     this.wsStream.onmessage = (e) => {
       const msg = JSON.parse(e.data);
       if (msg.type === 'status' && resultBox) resultBox.innerHTML = '视频流已连接，正在识别...';
-      if (msg.type === 'result') this.renderResult(module, msg.data);
+      if (msg.type === 'result') {
+        if (streamPreview && msg.data?.annotated_image) {
+          streamPreview.src = 'data:image/jpeg;base64,' + msg.data.annotated_image;
+          streamPreview.hidden = false;
+        }
+        this.renderResult(module, msg.data);
+      }
       if (msg.type === 'error') {
         if (resultBox) resultBox.innerHTML = `视频流错误：${msg.message}`;
         else alert(msg.message);
@@ -1202,6 +1222,11 @@ const App = {
     if (uploadVideo && !uploadVideo.hidden) uploadVideo.pause();
     const uploadPlay = document.getElementById('police-upload-play');
     if (uploadPlay) uploadPlay.textContent = '播放视频';
+    const streamPreview = document.getElementById('police-stream-preview');
+    if (streamPreview) {
+      streamPreview.hidden = true;
+      streamPreview.removeAttribute('src');
+    }
     if (this.streamModule) {
       const video = document.getElementById(this.streamModule + '-video');
       if (video?.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }

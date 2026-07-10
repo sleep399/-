@@ -392,7 +392,8 @@ h2 {
 .police-input-panel .gesture-ref { margin-top: .75rem; }
 .police-camera-wrap { min-height: 220px; }
 .police-camera-wrap #police-video,
-.police-camera-wrap #police-canvas {
+.police-camera-wrap #police-canvas,
+.police-camera-wrap #police-stream-preview {
   position: absolute;
   inset: 0;
   width: 100%;
