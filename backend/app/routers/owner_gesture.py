@@ -8,8 +8,8 @@ from app.models.records import OwnerGestureRecord, VehicleState
 from app.schemas import GestureResponse, VehicleStateResponse
 from app.services.owner_gesture_service import owner_gesture_service, OWNER_GESTURES
 from app.services.alert_agent import alert_agent
-from app.utils.auth import get_current_user
-from app.utils.logger import write_log
+from app.utils.auth import get_current_user, current_user_optional
+from app.utils.logger import write_log, log_exception, get_logger, localize_utc
 from app.config import settings
 
 router = APIRouter(prefix="/api/owner-gesture", tags=["车主手势控车"])
@@ -30,12 +30,19 @@ async def recognize(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
+    user=Depends(current_user_optional),
 ):
     content = await file.read()
     try:
         result = owner_gesture_service.recognize(content)
+    except FileNotFoundError as e:
+        await alert_agent.handle_model_load_failure(db, "hand_landmarker.task", e)
+        log_exception(db, "owner_gesture", "车主手势模型加载失败", e, user_id=user.id if user else None)
+        raise HTTPException(500, str(e))
     except Exception as e:
-        write_log(db, "owner_gesture", f"识别失败: {e}", level="ERROR", user_id=user.id if user else None)
+        log_exception(db, "owner_gesture", "车主手势识别失败", e, user_id=user.id if user else None)
+        alert_agent.record_gesture_failure("owner")
+        await alert_agent.check_and_alert(db, "owner")
         raise HTTPException(500, str(e))
 
     alert_agent.record_gesture_confidence("owner", result["confidence"])
@@ -60,6 +67,15 @@ async def recognize(
         state.updated_at = datetime.utcnow()
         db.commit()
         write_log(db, "owner_gesture", f"手势触发: {result['gesture_cn']} -> {result['action']}", user_id=user_id)
+    else:
+        log_level = "INFO" if result["confidence"] >= 0.4 else "WARN"
+        write_log(
+            db, "owner_gesture",
+            f"识别手势: {result['gesture_cn']} ({result['confidence']:.0%})，未触发控车动作",
+            level=log_level,
+            detail={"gesture": result["gesture"], "confidence": result["confidence"]},
+            user_id=user_id,
+        )
 
     save_path = settings.upload_dir / "owner" / f"{uuid.uuid4().hex}.jpg"
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -84,7 +100,7 @@ async def recognize(
 
 
 @router.get("/vehicle-state", response_model=VehicleStateResponse, summary="获取模拟车辆状态")
-def get_vehicle_state(db: Session = Depends(get_db), user=Depends(get_current_user)):
+def get_vehicle_state(db: Session = Depends(get_db), user=Depends(current_user_optional)):
     state = _get_or_create_state(db, user.id if user else None)
     return VehicleStateResponse(
         volume=state.volume,
@@ -99,7 +115,7 @@ def get_vehicle_state(db: Session = Depends(get_db), user=Depends(get_current_us
 def update_vehicle_state(
     data: VehicleStateResponse,
     db: Session = Depends(get_db),
-    user=Depends(get_current_user),
+    user=Depends(current_user_optional),
 ):
     state = _get_or_create_state(db, user.id if user else None)
     state.volume = data.volume
@@ -136,7 +152,7 @@ def history(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
             "confidence": r.confidence,
             "action": r.action,
             "annotated_image": r.annotated_image,
-            "created_at": r.created_at.isoformat(),
+            "created_at": localize_utc(r.created_at),
         }
         for r in records
     ]
