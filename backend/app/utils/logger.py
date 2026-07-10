@@ -32,6 +32,11 @@ def localize_utc(dt: Optional[datetime]) -> Optional[str]:
     return dt.replace(tzinfo=timezone.utc).astimezone(_TZ_CN).isoformat()
 
 
+def local_now_cn(fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    """返回当前北京时间字符串（用于 LLM 提示等）。"""
+    return datetime.now(_TZ_CN).strftime(fmt)
+
+
 # ──────────────────────────────────────────────
 # Python logging 体系 – 文件轮转 + 控制台输出
 # ──────────────────────────────────────────────

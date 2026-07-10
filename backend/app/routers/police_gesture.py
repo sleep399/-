@@ -83,7 +83,6 @@ def history(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
             "gesture_cn": r.gesture_cn,
             "confidence": r.confidence,
             "annotated_image": r.annotated_image,
-            "created_at": r.created_at.isoformat(),
             "created_at": localize_utc(r.created_at),
         }
         for r in records

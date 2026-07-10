@@ -2,14 +2,13 @@
 
 import json
 import re
-from datetime import datetime
 from typing import Any
 
 import httpx
 
 from app.config import settings, LLM_PROVIDER_PRESETS
 from app.database import SessionLocal
-from app.utils.logger import get_logger
+from app.utils.logger import get_logger, local_now_cn
 from app.utils.user_language import (
     event_type_to_user,
     level_to_user,
@@ -34,22 +33,23 @@ ALERT_SUMMARY_SYSTEM = """你是车载视觉感知系统的告警助手「小智
 1. 必须返回合法 JSON，不要 Markdown 代码块
 2. 各字段用完整、流畅的中文句子，像人在说话
 3. 摘要里自然涵盖：异常类型、发生时间、影响范围、建议怎么处置
-4. 处置建议要具体可执行，用「您可以先…再…」这类口语，不要写「请查看日志」"""
+4. 时间描述优先用「刚刚」「过去几分钟内」等相对说法，不要写具体钟点（界面会单独显示精确时间）
+5. 处置建议要具体可执行，用「您可以先…再…」这类口语，不要写「请查看日志」"""
 
 ALERT_SUMMARY_USER_TEMPLATE = """刚检测到一项系统异常，请用 JSON 生成一份用户能直接看懂的告警摘要：
 
 {{
   "title": "一句话标题，口语化，不要英文代号",
-  "summary": "2-3 句连贯叙述：刚才发生了什么、大概什么时候、会影响到哪些功能（把类型/时间/影响自然写进正文，不要列小标题）",
+  "summary": "2-3 句连贯叙述：刚才发生了什么、大概什么时候（用「刚刚/几分钟前」，勿写「八点三十分」这类钟点）、会影响到哪些功能（把类型/时间/影响自然写进正文，不要列小标题）",
   "root_cause": "用「可能是…」「多半因为…」这类口吻解释原因",
   "suggestion": "告诉用户具体怎么做，用自然口语串联（可适度用 1.2.3.，但不要以「处理方法」开头）",
   "impact_scope": "一句话概括影响面，供系统归档用",
-  "occurred_at": "发生时间描述（如：刚刚 / 过去几分钟内连续出现）"
+  "occurred_at": "发生时间描述（如：刚刚 / 过去几分钟内连续出现，勿写具体钟点）"
 }}
 
 异常类型: {event_type}（含义：{event_type_cn}）
 告警级别: {level}（info=提示, warning=警告, critical=严重）
-当前时间: {now}
+当前时间（北京时间，仅供理解时效，摘要里勿写具体钟点）: {now}
 上下文数据: {context}
 """
 
@@ -273,7 +273,7 @@ class LLMService:
         if force_template or not settings.llm_configured:
             return self._template_summary(event_type, level, context)
 
-        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        now = local_now_cn()
         user_prompt = ALERT_SUMMARY_USER_TEMPLATE.format(
             event_type=event_type,
             event_type_cn=event_type_to_user(event_type),
@@ -303,6 +303,34 @@ class LLMService:
         result["_llm_failed"] = True
         return result
 
+    @staticmethod
+    def _merge_impact_scope(summary: str, impact: Any) -> str:
+        """将 impact_scope 并入摘要，避免与 LLM 已有表述重复或「影响到影响…」。"""
+        if not impact:
+            return summary
+        impact_text = humanize_tech_terms(str(impact)).strip()
+        if not impact_text:
+            return summary
+        if impact_text in summary:
+            return summary
+
+        core = impact_text
+        for prefix in ("影响到", "影响"):
+            if core.startswith(prefix):
+                core = core[len(prefix):].strip()
+                break
+        if core and core in summary:
+            return summary
+        if "影响" in summary and impact_text.startswith("影响"):
+            return summary
+        if re.search(r"可能(会)?影响", summary):
+            return summary
+
+        fragment = core or impact_text
+        if summary.endswith(("。", "！", "？")):
+            return f"{summary[:-1]}，可能会影响{fragment}。"
+        return f"{summary}，可能会影响{fragment}。"
+
     def _normalize_summary(
         self,
         parsed: dict[str, Any],
@@ -313,13 +341,7 @@ class LLMService:
         """合并 LLM 输出与模板兜底，确保字段完整。"""
         fallback = self._template_summary(event_type, level, context)
         summary = humanize_tech_terms(str(parsed.get("summary") or fallback["summary"]))
-        impact = parsed.get("impact_scope")
-        if impact and str(impact) not in summary:
-            impact_text = humanize_tech_terms(str(impact))
-            if summary.endswith(("。", "！", "？")):
-                summary = f"{summary[:-1]}，可能会影响到{impact_text}。"
-            else:
-                summary = f"{summary}，可能会影响到{impact_text}。"
+        summary = self._merge_impact_scope(summary, parsed.get("impact_scope"))
 
         return {
             "title": humanize_tech_terms(str(parsed.get("title") or fallback["title"])),

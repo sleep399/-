@@ -9,8 +9,10 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 from app.database import Base, SessionLocal, engine
 from app.models.alerts import AlertEvent
 from app.models.logs import SystemLog
+from app.models.user import User
 from app.services.alert_agent import alert_agent, EVENT_TYPES, DEFAULT_LEVELS
 from app.services.llm_service import llm_service
+from app.utils.auth import hash_password
 
 
 class AlertAgentTest(unittest.IsolatedAsyncioTestCase):
@@ -24,6 +26,13 @@ class AlertAgentTest(unittest.IsolatedAsyncioTestCase):
         alert_agent._confidence_history.clear()
         alert_agent._failure_timestamps.clear()
         alert_agent._token_usage = {"used": 0, "limit": 100000}
+
+    def _seed_user(self, username: str = "testuser") -> User:
+        user = User(username=username, email=f"{username}@test.com", hashed_password=hash_password("pass123"))
+        self.db.add(user)
+        self.db.commit()
+        self.db.refresh(user)
+        return user
 
     async def asyncTearDown(self):
         self.db.close()
@@ -330,6 +339,54 @@ class AlertAgentTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("web", alert.channels_sent)
         self.assertEqual(alert.status, "open")
+
+    async def _trigger_gesture_alert(self, module: str):
+        for _ in range(5):
+            alert_agent.record_gesture_confidence(module, 0.25)
+        return await alert_agent.check_and_alert(self.db, module)
+
+    async def test_gesture_alert_merges_into_open_alert(self):
+        alert1 = await self._trigger_gesture_alert("police")
+        self.assertIsNotNone(alert1)
+        self.assertEqual(self.db.query(AlertEvent).count(), 1)
+        alert2 = await self._trigger_gesture_alert("police")
+        self.assertEqual(alert1.id, alert2.id)
+        self.assertEqual(self.db.query(AlertEvent).count(), 1)
+
+    async def test_logout_writes_user_log(self):
+        from fastapi import Request
+        from app.routers.auth import logout
+
+        user = self._seed_user("logout_user")
+        request = Request(scope={"type": "http", "client": ("127.0.0.1", 12345), "headers": []})
+        result = logout(request=request, user=user, db=self.db)
+        self.assertIn("退出", result.get("message", ""))
+        row = (
+            self.db.query(SystemLog)
+            .filter(SystemLog.category == "user", SystemLog.message.like("%退出%"))
+            .order_by(SystemLog.id.desc())
+            .first()
+        )
+        self.assertIsNotNone(row)
+        self.assertEqual(row.user_id, user.id)
+
+
+class LLMSummaryNormalizeTest(unittest.TestCase):
+    def test_merge_impact_skips_when_summary_already_has_impact_phrasing(self):
+        summary = "刚刚检测到手势识别不太准，可能会影响到通过手势控制车辆的功能。"
+        result = llm_service._merge_impact_scope(summary, "影响手势识别功能的正常使用")
+        self.assertEqual(result, summary)
+
+    def test_merge_impact_strips_leading_yingxiang(self):
+        summary = "系统检测到手势识别准确性下降。"
+        result = llm_service._merge_impact_scope(summary, "手势识别功能的正常运作")
+        self.assertIn("可能会影响手势识别功能的正常运作", result)
+        self.assertNotIn("影响到影响", result)
+
+    def test_merge_impact_no_duplicate_when_core_already_present(self):
+        summary = "这可能会让手势操作不灵敏，影响手势识别功能。"
+        result = llm_service._merge_impact_scope(summary, "影响手势识别功能的准确性")
+        self.assertEqual(result, summary)
 
 
 if __name__ == "__main__":

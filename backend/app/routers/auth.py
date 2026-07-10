@@ -136,6 +136,18 @@ def wechat_poll(session_id: str, db: Session = Depends(get_db)):
     return {"status": session.status}
 
 
+@router.post("/logout", summary="退出登录")
+def logout(request: Request, user: User = Depends(require_user), db: Session = Depends(get_db)):
+    client_ip = request.client.host if request.client else "unknown"
+    write_log(
+        db, "user", f"用户退出: {user.username}",
+        level="INFO",
+        detail={"ip": client_ip},
+        user_id=user.id,
+    )
+    return {"message": "已退出登录"}
+
+
 @router.get("/me", summary="当前用户信息")
 def me(user: User = Depends(require_user)):
     return {"id": user.id, "username": user.username, "email": user.email, "phone": user.phone}

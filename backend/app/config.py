@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     # ── 告警智能体增强配置 ──
     alert_window_seconds: int = 300            # 滑动窗口（秒），用于计算失败率
     alert_cooldown_seconds: int = 60           # 同类型告警冷却时间（秒），避免重复告警
+    alert_gesture_cooldown_seconds: int = 1800  # 手势低置信度告警冷却（秒），默认 30 分钟
     alert_config_cooldown_seconds: int = 3600  # 配置类告警冷却（启动/可选配置，避免刷屏）
     alert_token_warning_threshold: int = 80000 # Token 用量警告阈值
     alert_token_critical_threshold: int = 95000# Token 用量严重阈值
@@ -82,7 +83,6 @@ class Settings(BaseSettings):
     alert_email_enabled: bool = False          # 是否启用邮件推送（暂时关闭）
 
     class Config:
-        env_file = ".env"
         env_file = str(BASE_DIR / ".env")
         env_file_encoding = "utf-8"
         extra = "ignore"

@@ -57,6 +57,10 @@ OPTIONAL_CONFIG_KEYS = frozenset({
     "llm_api_key", "llm",
 })
 
+MERGEABLE_EVENT_TYPES = frozenset({
+    "gesture_low_confidence",
+})
+
 DEFAULT_LEVELS = {
     "lpr_consecutive_failure": "critical",
     "lpr_high_failure_rate": "warning",
@@ -541,24 +545,47 @@ class AlertAgent:
         decision_level = self._decide_level(event_type, level, observed)
         observed["decided_level"] = decision_level
         observed["original_level"] = level
+        dedup_key = self._dedup_key(event_type, observed)
 
-        # 2) 冷却检查（同类型告警间隔）
-        if not self._should_alert(event_type):
-            agent_logger.info(
-                f"Alert suppressed by cooldown: {event_type} "
-                f"(last={self._last_alert_time.get(event_type)})"
-            )
-            write_agent_log(
-                db,
-                f"告警冷却抑制: {EVENT_TYPES.get(event_type, event_type)}",
-                level="INFO",
-                detail={
-                    "event_type": event_type,
-                    "decided_level": decision_level,
-                    "last_alert_at": _localize_utc(self._last_alert_time.get(event_type)),
-                },
-            )
-            return None
+        async with self._lock:
+            # 2) 合并到已有未处理告警（限定类型，避免 gesture 等刷屏）
+            if event_type in MERGEABLE_EVENT_TYPES:
+                existing = self._find_mergeable_open_alert(db, event_type, observed)
+                if existing:
+                    agent_logger.info(f"Alert merged into #{existing.id}: {event_type}")
+                    write_agent_log(
+                        db,
+                        f"告警合并抑制新建: {EVENT_TYPES.get(event_type, event_type)} → #{existing.id}",
+                        level="INFO",
+                        detail={
+                            "event_type": event_type,
+                            "merged_into": existing.id,
+                            "dedup_key": dedup_key,
+                        },
+                    )
+                    return await self._merge_alert(db, existing, decision_level, observed)
+
+            # 3) 冷却检查（同类型告警间隔）
+            if not self._should_alert(event_type, observed):
+                agent_logger.info(
+                    f"Alert suppressed by cooldown: {dedup_key} "
+                    f"(last={self._last_alert_time.get(dedup_key)})"
+                )
+                write_agent_log(
+                    db,
+                    f"告警冷却抑制: {EVENT_TYPES.get(event_type, event_type)}",
+                    level="INFO",
+                    detail={
+                        "event_type": event_type,
+                        "dedup_key": dedup_key,
+                        "decided_level": decision_level,
+                        "last_alert_at": _localize_utc(self._last_alert_time.get(dedup_key)),
+                    },
+                )
+                return None
+
+            # 并发保护：先占位冷却，避免多帧同时创建多条告警
+            self._last_alert_time[dedup_key] = datetime.utcnow()
 
         write_agent_log(
             db,
@@ -566,26 +593,114 @@ class AlertAgent:
             level="INFO" if decision_level == "info" else ("WARN" if decision_level == "warning" else "CRITICAL"),
             detail={
                 "event_type": event_type,
+                "dedup_key": dedup_key,
                 "original_level": level,
                 "decided_level": decision_level,
                 "context": observed,
             },
         )
 
-        # 3) 生成告警
+        # 4) 生成告警（LLM 较慢，放在锁外）
         return await self.trigger_alert(db, event_type, decision_level, observed, force_template=force_template)
 
-    def _should_alert(self, event_type: str) -> bool:
-        """检查是否应该发送告警（冷却机制）"""
-        last = self._last_alert_time.get(event_type)
+    @staticmethod
+    def _parse_detail_json(alert: AlertEvent) -> dict:
+        if not alert.detail_json:
+            return {}
+        try:
+            return json.loads(alert.detail_json)
+        except Exception:
+            return {}
+
+    def _dedup_key(self, event_type: str, context: dict | None = None) -> str:
+        ctx = context or {}
+        if event_type == "gesture_low_confidence":
+            return f"{event_type}:{ctx.get('module', 'unknown')}"
+        if event_type == "model_load_failure":
+            return f"{event_type}:{ctx.get('model_name', 'unknown')}"
+        return event_type
+
+    def _cooldown_seconds(self, event_type: str) -> int:
+        if event_type == "gesture_low_confidence":
+            return settings.alert_gesture_cooldown_seconds
+        if event_type == "config_missing":
+            return settings.alert_config_cooldown_seconds
+        return settings.alert_cooldown_seconds
+
+    def _find_mergeable_open_alert(
+        self, db: Session, event_type: str, context: dict
+    ) -> AlertEvent | None:
+        target_key = self._dedup_key(event_type, context)
+        rows = (
+            db.query(AlertEvent)
+            .filter(AlertEvent.event_type == event_type, AlertEvent.status == "open")
+            .order_by(AlertEvent.created_at.desc())
+            .limit(30)
+            .all()
+        )
+        for row in rows:
+            if self._dedup_key(event_type, self._parse_detail_json(row)) == target_key:
+                return row
+        return None
+
+    async def _merge_alert(
+        self,
+        db: Session,
+        alert: AlertEvent,
+        level: str,
+        context: dict,
+    ) -> AlertEvent:
+        existing_detail = self._parse_detail_json(alert)
+        count = int(existing_detail.get("occurrence_count", 1)) + 1
+        merged_context = {**existing_detail, **context}
+        merged_context["occurrence_count"] = count
+        merged_context["last_occurrence_at"] = datetime.utcnow().isoformat()
+
+        if self.LEVELS.get(level, 0) > self.LEVELS.get(alert.level, 0):
+            alert.level = level
+
+        alert.detail_json = json.dumps(merged_context, ensure_ascii=False)
+
+        conf = context.get("confidence")
+        suffix = f"（同类异常已累计 {count} 次"
+        if isinstance(conf, (int, float)):
+            suffix += f"，最近平均置信度 {conf:.0%}"
+        suffix += "）"
+        base_summary = (alert.summary or "").split("（同类异常已累计")[0].strip()
+        if base_summary:
+            alert.summary = f"{base_summary}{suffix}"
+        else:
+            title = alert.title or EVENT_TYPES.get(alert.event_type, alert.event_type)
+            alert.summary = f"{title}{suffix}"
+
+        alert.system_health_json = json.dumps({
+            "perception": self.get_perception_snapshot(),
+            "decision_level": alert.level,
+            "event_type": alert.event_type,
+            "merged": True,
+            "occurrence_count": count,
+        }, ensure_ascii=False)
+        db.commit()
+        db.refresh(alert)
+
+        dedup_key = self._dedup_key(alert.event_type, context)
+        self._last_alert_time[dedup_key] = datetime.utcnow()
+
+        write_agent_log(
+            db,
+            f"告警合并更新 #{alert.id}: {EVENT_TYPES.get(alert.event_type, alert.event_type)} ×{count}",
+            level="INFO",
+            detail={"alert_id": alert.id, "occurrence_count": count, "dedup_key": dedup_key},
+        )
+        return alert
+
+    def _should_alert(self, event_type: str, context: dict | None = None) -> bool:
+        """检查是否应该发送告警（冷却机制，按去重键区分）。"""
+        key = self._dedup_key(event_type, context)
+        last = self._last_alert_time.get(key)
         if last is None:
             return True
-        cooldown_sec = (
-            settings.alert_config_cooldown_seconds
-            if event_type == "config_missing"
-            else settings.alert_cooldown_seconds
-        )
-        cooldown = timedelta(seconds=cooldown_sec)
+        cooldown = timedelta(seconds=self._cooldown_seconds(event_type))
         if datetime.utcnow() - last >= cooldown:
             return True
         return False
@@ -734,7 +849,7 @@ class AlertAgent:
         db.refresh(alert)
 
         # 3) 记录告警冷却时间
-        self._last_alert_time[event_type] = now
+        self._last_alert_time[self._dedup_key(event_type, context)] = now
 
         # 4) 写入告警日志
         write_alert_log(db, alert.id, level, alert.title, event_type, alert.summary, "web")
@@ -1016,6 +1131,30 @@ class AlertAgent:
                     total_minutes += delta
                     count += 1
         return round(total_minutes / count, 1) if count else None
+
+    def consolidate_duplicate_open_alerts(self, db: Session) -> int:
+        """同模块 gesture_low_confidence 仅保留最新一条 open，其余标记已处理。"""
+        open_rows = (
+            db.query(AlertEvent)
+            .filter(AlertEvent.status == "open", AlertEvent.event_type == "gesture_low_confidence")
+            .order_by(AlertEvent.created_at.desc())
+            .all()
+        )
+        seen_keys: set[str] = set()
+        resolved = 0
+        now = datetime.utcnow()
+        for row in open_rows:
+            key = self._dedup_key(row.event_type, self._parse_detail_json(row))
+            if key in seen_keys:
+                row.status = "resolved"
+                row.resolved_at = now
+                row.resolution_note = "系统自动合并：同类型重复手势告警"
+                resolved += 1
+            else:
+                seen_keys.add(key)
+        if resolved:
+            db.commit()
+        return resolved
 
     def get_stats(self, db: Session) -> dict[str, Any]:
         """获取告警统计仪表盘数据"""

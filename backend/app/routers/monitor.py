@@ -367,7 +367,7 @@ def resolve_alert(
 
 @router.post("/alerts/cleanup-noise", summary="清理历史噪声告警")
 def cleanup_noise_alerts(db: Session = Depends(get_db)):
-    """将测试告警、可选配置缺失等历史噪声标记为已处理，避免仪表盘一直显示未处理。"""
+    """将测试告警、可选配置缺失、重复手势低置信度等历史噪声标记为已处理。"""
     noise_types = ("config_missing", "test_event")
     rows = (
         db.query(AlertEvent)
@@ -381,7 +381,12 @@ def cleanup_noise_alerts(db: Session = Depends(get_db)):
         if not alert.resolution_note:
             alert.resolution_note = "系统自动清理：测试/可选配置类历史告警，非真实故障"
     db.commit()
-    return {"resolved": len(rows), "types": list(noise_types)}
+    gesture_resolved = alert_agent.consolidate_duplicate_open_alerts(db)
+    return {
+        "resolved": len(rows) + gesture_resolved,
+        "types": list(noise_types),
+        "gesture_duplicates_resolved": gesture_resolved,
+    }
 
 
 @router.post("/alerts/test", summary="触发测试告警")

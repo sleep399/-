@@ -28,6 +28,7 @@ const App = {
   replayStepIndex: 0,
   replayPlayTimer: null,
   agentOpenCount: 0,
+  _recentAlertKeys: {},
   agentDragMoved: false,
   agentSpeechTimer: null,
   _agentPointerId: null,
@@ -272,6 +273,9 @@ const App = {
   },
 
   logout() {
+    if (this.token) {
+      fetch('/api/auth/logout', { method: 'POST', headers: this.headers() }).catch(() => {});
+    }
     this.token = '';
     localStorage.removeItem('token');
     this.stopStream();
@@ -287,11 +291,7 @@ const App = {
     this.wsAlerts = new WebSocket(`${proto}://${location.host}/ws/alerts`);
     this.wsAlerts.onmessage = (e) => {
       const data = JSON.parse(e.data);
-      if (data.type === 'alert') {
-        this.showToast(data);
-        this.prependLiveAlert(data);
-        this.onAgentAlert(data);
-      }
+      if (data.type === 'alert') this.handleIncomingAlert(data);
     };
       this.wsAlerts.onopen = () => { var el = document.getElementById('stat-ws-conn'); if (el) el.textContent = '1'; };
       this.wsAlerts.onclose = () => {
@@ -313,11 +313,7 @@ const App = {
     this.sseSource.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
-        if (data.type === 'alert') {
-          this.showToast(data);
-          this.prependLiveAlert(data);
-          this.onAgentAlert(data);
-        }
+        if (data.type === 'alert') this.handleIncomingAlert(data);
       } catch (err) {}
     };
     this.sseSource.onerror = () => {
@@ -328,6 +324,23 @@ const App = {
   disconnectSSE() {
     if (this.sseSource) { this.sseSource.close(); this.sseSource = null; }
     var ssc2 = document.getElementById('stat-sse-conn'); if (ssc2) ssc2.textContent = '0';
+  },
+
+  handleIncomingAlert(alert) {
+    if (!alert) return;
+    const now = Date.now();
+    const key = alert.id
+      ? `id:${alert.id}`
+      : `et:${alert.event_type || ''}:${alert.title || ''}`;
+    const last = this._recentAlertKeys[key] || 0;
+    if (now - last < 60000) return;
+    this._recentAlertKeys[key] = now;
+    Object.keys(this._recentAlertKeys).forEach(k => {
+      if (now - this._recentAlertKeys[k] > 120000) delete this._recentAlertKeys[k];
+    });
+    this.showToast(alert);
+    this.prependLiveAlert(alert);
+    this.onAgentAlert(alert);
   },
 
   showToast(alert) {
@@ -1188,10 +1201,9 @@ const App = {
   renderLogTable(logs) {
     const table = document.getElementById('log-table');
     if (!table) return;
-    table.innerHTML =
-      '<div class="log-row header"><span>时间</span><span>级别</span><span>类别</span><span>消息</span><span>用户</span></div>' +
-      (logs || []).map(l => this.renderLogRow(l, false)).join('') ||
-      '<p style="padding:1rem;color:var(--text-muted);">暂无日志</p>';
+    const header = '<div class="log-row header"><span>时间</span><span>级别</span><span>类别</span><span>消息</span><span>用户</span></div>';
+    const rows = (logs || []).map(l => this.renderLogRow(l, false)).join('');
+    table.innerHTML = header + (rows || '<p style="padding:1rem;color:var(--text-muted);">暂无符合条件的日志</p>');
   },
 
   prependLiveLog(log) {
