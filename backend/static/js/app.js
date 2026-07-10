@@ -115,7 +115,7 @@ const App = {
     try {
       const session = await this.api('/api/auth/wechat/qrcode', { method: 'POST' });
       const qrBox = document.getElementById('qr-box');
-      qrBox.innerHTML = `微信扫码登录<br><small>${session.session_id.slice(0, 8)}</small><div class="qr-placeholder">二维码已生成，当前为演示模式</div>`;
+      qrBox.innerHTML = `<img src="${session.qrcode_url}" alt="微信扫码登录二维码"><small>请用手机扫描后确认（演示模式）</small>`;
       const poll = setInterval(async () => {
         const res = await fetch(session.poll_url);
         const data = await res.json();
