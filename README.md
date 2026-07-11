@@ -23,8 +23,8 @@ python run.py
 
 Windows 用户也可以进入该目录后运行 `start.bat`。
 
-默认访问地址为 <http://localhost:8000>，API 文档位于
-<http://localhost:8000/api/docs>。
+默认访问地址为 <http://localhost:8001>，API 文档位于
+<http://localhost:8001/api/docs>。
 
 详细功能、配置和目录说明请参阅
 [`database/vehicle-vision-system/README.md`](database/vehicle-vision-system/README.md)。
