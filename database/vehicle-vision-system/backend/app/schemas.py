@@ -1,6 +1,7 @@
-from pydantic import BaseModel, EmailStr
-from typing import Optional
 from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel, EmailStr
 
 
 class Token(BaseModel):
@@ -59,6 +60,12 @@ class GestureResponse(BaseModel):
     success: bool
     record_id: Optional[int] = None
     action: Optional[str] = None
+    needs_confirmation: bool = False
+    confirmation_resolved: bool = False
+    confirmation_accepted: bool = False
+    debug_info: Optional[dict] = None
+    confirm_prompt: Optional[str] = None
+    vehicle_state: Optional[dict] = None
 
 
 class VehicleStateResponse(BaseModel):
