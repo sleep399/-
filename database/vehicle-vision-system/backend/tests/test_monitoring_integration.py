@@ -126,7 +126,7 @@ def test_monitoring_frontend_exposes_structured_alerts_and_chinese_logs():
     js += (BACKEND_DIR / "static" / "js" / "monitoring-workbench.js").read_text(encoding="utf-8")
     assert 'id="assistant-context-bar"' in html
     assert 'id="test-alert-type"' in html
-    assert 'monitoring-workbench.js?v=20260713-joint1' in html
+    assert 'monitoring-workbench.js?v=20260713-mirror2' in html
     assert '<option value="警告">警告</option>' in html
     assert "severity_assessment" in js
     assert "focusedAlertId" in js
@@ -141,8 +141,9 @@ def test_complete_monitoring_workbench_assets_and_controls_are_present():
         "assistant-bot", "agent-activity", "alert-analytics-panel",
         "replay-player", "assistant-context-bar", "scenario-fusion-panel",
         "scenario-snapshot", "scenario-driving-advice", "scenario-conflicts",
-        "joint-recognition-panel", "joint-source-mode", "joint-start-btn",
-        "joint-lpr-result", "joint-police-result", "joint-owner-result",
+        "recognition-mirror-panel", "mirror-lpr-result", "mirror-police-result",
+        "mirror-owner-result", "mirror-owner-volume", "mirror-owner-temperature",
+        "mirror-owner-phone", "mirror-owner-selection",
     ):
         assert f'id="{element_id}"' in html
     for marker in (
@@ -156,42 +157,64 @@ def test_complete_monitoring_workbench_assets_and_controls_are_present():
     assert ".log-stats" in css
 
 
-def test_joint_recognition_frontend_keeps_independent_runtime_and_source_fanout():
+def test_alert_center_mirrors_original_module_runtime_without_second_capture_path():
     html = (BACKEND_DIR / "static" / "index.html").read_text(encoding="utf-8")
     app = (BACKEND_DIR / "static" / "js" / "app.js").read_text(encoding="utf-8")
     workbench = (BACKEND_DIR / "static" / "js" / "monitoring-workbench.js").read_text(encoding="utf-8")
 
-    assert "jointRecognition: {" in app
-    assert "channels: {}" in app
-    assert "mediaSources: new Map()" in app
-    joint_runtime = workbench[workbench.index("jointModules()") : workbench.index("isIdleDrivingAdvice")]
-    assert "if (this.streamModule || this.lprVideoMode)" in joint_runtime
-    assert "this.streamModule =" not in joint_runtime
-    assert "this.wsStream" not in joint_runtime
+    for element_id in (
+        "mirror-lpr-status", "mirror-lpr-source", "mirror-lpr-image",
+        "mirror-police-status", "mirror-police-source", "mirror-police-image",
+        "mirror-owner-status", "mirror-owner-source", "mirror-owner-image",
+        "mirror-owner-awake", "mirror-owner-volume-fill",
+        "mirror-owner-temperature-fill",
+    ):
+        assert f'id="{element_id}"' in html
+    for removed_id in (
+        "joint-source-mode", "joint-target-fps", "joint-refresh-devices",
+        "joint-start-btn", "joint-stop-btn", "joint-lpr-kind",
+        "joint-police-device", "joint-owner-url",
+    ):
+        assert f'id="{removed_id}"' not in html
 
-    assert 'value="shared">三模块共享同一来源' in html
-    assert 'value="independent">三模块分别配置' in html
-    assert "navigator.mediaDevices.getUserMedia" in workbench
-    assert "for (const constraints of attempts)" in workbench
-    assert "mediaByDevice.get(requestedDeviceId)" in workbench
-    assert "state.mediaSources.set(key, info)" in workbench
-    assert "async acquireJointLocalSources(configs, runToken)" in workbench
-    assert "async attachJointLocalPreview(config, runToken)" in workbench
-    assert "if (state.runToken !== runToken)" in workbench
-    assert "stream.getTracks().forEach(item => item.stop())" in workbench
-    assert "if (video.srcObject === info.stream)" in workbench
-    assert "Promise.all(configs.map(config => this.openJointChannel(config)))" in workbench
-    assert "if (channel.busy) return" in workbench
-    assert "channel.markReady = finishResolve" in workbench
-    assert "等待网络流首帧" in workbench
-    assert "jointRecognitionBlocksLegacyStart" in app
+    assert "moduleStreams: {" in app
+    assert "cameraSources: new Map()" in app
+    assert "moduleCameraBindings: {}" in app
+    assert "cameraOpenPromise: null" in app
+    assert "bindModuleCamera(module" in app
+    assert "releaseModuleCamera(module)" in app
+    assert "claimModuleRun(module)" in app
+    assert "stopStream(module)" in app
+    assert "stopStream('police')" in html
+    assert "stopStream('owner')" in html
+    assert 'id="owner-stream-url"' in html
+    assert 'id="lpr-camera-device"' in html
+    assert 'id="lpr-camera-status"' in html
+    assert 'id="lpr-video"' in html
+    assert "startStream('lpr')" in html
+    assert "publishRecognitionResult?.('police', row" in app
+    assert "publishRecognitionResult?.('lpr', data" in app
+    assert "publishOwnerVehicleState?.(this.ownerVehicleState)" in app
+    assert "module === 'owner' && this.token" in app
+    stop_lpr = app[app.index("async stopVideoStream()") : app.index("stopStream(module)")]
+    assert "this.stopStream(" not in stop_lpr
+    assert "jointRecognition" not in app
+    assert "jointRecognitionBlocksLegacyStart" not in app
 
-    assert "/ws/stream-url/${config.module}" in workbench
-    assert "/ws/stream/owner?token=" in workbench
-    assert "source_id: config.sourceId" in workbench
-    assert "target_fps: config.targetFps" in workbench
-    assert "jointSourceLabel(lpr.source_id, lpr.source)" in workbench
-    assert "refreshInFlight" in workbench
+    mirror_runtime = workbench[
+        workbench.index("initRecognitionMirrors") : workbench.index("scheduleScenarioFusionRefresh")
+    ]
+    assert "publishRecognitionResult" in mirror_runtime
+    assert "publishOwnerVehicleState" in mirror_runtime
+    assert "? current : null" in workbench
+    assert "options.acceptVehicleState !== false" in workbench
+    assert "state.result = null" in workbench
+    assert "new WebSocket" not in mirror_runtime
+    assert "getUserMedia" not in mirror_runtime
+    assert ".send(" not in mirror_runtime
+    assert "startJointRecognition" not in workbench
+    assert "refreshJointCameraDevices" not in workbench
+    assert "this.scenarioFusionRefresh" in workbench
     assert "runScenarioFusionRefresh" in workbench
 
 

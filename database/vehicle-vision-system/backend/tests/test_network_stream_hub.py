@@ -136,6 +136,48 @@ def test_different_urls_use_different_captures():
     second.close()
 
 
+def test_single_transient_read_failure_does_not_drop_all_subscribers():
+    class FlakyCapture:
+        def __init__(self):
+            self.read_count = 0
+            self.released = False
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_args):
+            return True
+
+        def read(self):
+            self.read_count += 1
+            if self.read_count == 1:
+                return False, None
+            if self.read_count == 2:
+                return True, np.full((2, 2, 3), 9, dtype=np.uint8)
+            while not self.released:
+                time.sleep(0.01)
+            return False, None
+
+        def release(self):
+            self.released = True
+
+    capture = FlakyCapture()
+    hub = NetworkStreamHub(capture_factory=lambda *_args: capture)
+    first = hub.subscribe("rtsp://camera.local/live")
+    second = hub.subscribe("rtsp://camera.local/live")
+
+    first_frame = first.next_frame(timeout=1.0)
+    second_frame = second.next_frame(timeout=1.0)
+    assert first_frame is not None and second_frame is not None
+    assert np.all(first_frame.frame == 9)
+    assert capture.read_count >= 2
+
+    first.close()
+    assert not capture.released
+    second.close()
+    _wait_until(lambda: capture.released)
+
+
 def test_network_stream_and_subscriber_limits_prevent_unbounded_workers():
     factory = CaptureFactory()
     hub = NetworkStreamHub(

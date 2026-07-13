@@ -65,6 +65,13 @@ class StreamFrame:
     captured_at: float
 
 
+@dataclass(frozen=True)
+class StreamInfo:
+    width: int
+    height: int
+    fps: float
+
+
 class _CaptureWorker:
     def __init__(
         self,
@@ -82,6 +89,7 @@ class _CaptureWorker:
         self._latest_frame: np.ndarray | None = None
         self._captured_at = 0.0
         self._error: str | None = None
+        self._stream_info: StreamInfo | None = None
         self._subscribers = 0
         self._thread = threading.Thread(
             target=self._run,
@@ -104,6 +112,25 @@ class _CaptureWorker:
     def subscriber_count(self) -> int:
         with self._condition:
             return self._subscribers
+
+    def wait_until_ready(self, timeout: float | None = 8.5) -> StreamInfo:
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        with self._condition:
+            while (
+                self._stream_info is None
+                and not self._error
+                and not self._stop_event.is_set()
+            ):
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    raise NetworkStreamError("network camera stream open timed out")
+                self._condition.wait(remaining)
+
+            if self._stream_info is not None:
+                return self._stream_info
+            if self._error:
+                raise NetworkStreamError(self._error)
+            raise NetworkStreamError("network camera stream is closing")
 
     def read_after(self, sequence: int, timeout: float | None = 1.0) -> StreamFrame | None:
         deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
@@ -148,6 +175,28 @@ class _CaptureWorker:
             self._error = message
             self._condition.notify_all()
 
+    @staticmethod
+    def _capture_value(capture, prop: int, default: float) -> float:
+        try:
+            value = float(capture.get(prop))
+        except Exception:
+            return default
+        if not np.isfinite(value) or value <= 0:
+            return default
+        return value
+
+    def _set_ready(self, capture) -> None:
+        info = StreamInfo(
+            width=int(self._capture_value(capture, cv2.CAP_PROP_FRAME_WIDTH, 1280)),
+            height=int(self._capture_value(capture, cv2.CAP_PROP_FRAME_HEIGHT, 720)),
+            fps=self._capture_value(capture, cv2.CAP_PROP_FPS, 25.0),
+        )
+        with self._condition:
+            if self._stop_event.is_set():
+                return
+            self._stream_info = info
+            self._condition.notify_all()
+
     def _run(self) -> None:
         try:
             capture = self._capture_factory(self.url, cv2.CAP_FFMPEG)
@@ -160,13 +209,21 @@ class _CaptureWorker:
             if not capture.isOpened():
                 self._set_error("unable to open network camera stream")
                 return
+            self._set_ready(capture)
 
+            consecutive_read_failures = 0
             while not self._stop_event.is_set():
                 ok, frame = capture.read()
                 if not ok or frame is None:
-                    if not self._stop_event.is_set():
-                        self._set_error("network camera stream read failed or ended")
-                    return
+                    consecutive_read_failures += 1
+                    if consecutive_read_failures >= 3:
+                        if not self._stop_event.is_set():
+                            self._set_error("network camera stream read failed or ended")
+                        return
+                    if self._stop_event.wait(0.1):
+                        return
+                    continue
+                consecutive_read_failures = 0
                 with self._condition:
                     self._sequence += 1
                     self._latest_frame = frame.copy()
@@ -205,6 +262,11 @@ class NetworkStreamSubscription:
         if item is not None:
             self._sequence = item.sequence
         return item
+
+    def wait_until_ready(self, timeout: float | None = 8.5) -> StreamInfo:
+        if self._closed:
+            raise NetworkStreamError("subscription is closed")
+        return self._worker.wait_until_ready(timeout)
 
     def close(self) -> None:
         with self._close_lock:

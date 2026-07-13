@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>车载视觉感知与人机交互系统</title>
   <link rel="stylesheet" href="/static/css/style.css?v=20260713-merge1">
-  <link rel="stylesheet" href="/static/css/monitoring-workbench.css?v=20260713-joint1">
+  <link rel="stylesheet" href="/static/css/monitoring-workbench.css?v=20260713-mirror2">
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 </head>
 <body>
@@ -106,6 +106,20 @@
                 <button class="btn" onclick="document.getElementById('lpr-file').click()">选择文件</button>
               </div>
               <div class="panel" style="margin-top:1rem">
+                <h4>USB / 内置 / DroidCam 摄像头实时识别</h4>
+                <div class="camera-device-row" id="lpr-camera-row">
+                  <select id="lpr-camera-device" aria-label="车牌识别摄像头">
+                    <option value="">默认摄像头</option>
+                  </select>
+                  <button class="btn" type="button" onclick="App.refreshCameraDevices('lpr')">刷新摄像头</button>
+                  <span id="lpr-camera-status" class="camera-status">尚未检测摄像头</span>
+                </div>
+                <div class="row" style="align-items:center; gap:.75rem; flex-wrap:wrap">
+                  <button class="btn primary" type="button" onclick="App.startStream('lpr')">启动摄像头识别</button>
+                  <button class="btn" type="button" onclick="App.stopStream('lpr')">停止摄像头识别</button>
+                </div>
+              </div>
+              <div class="panel" style="margin-top:1rem">
                 <h4>沙盘 RTSP 实时识别</h4>
                 <div class="row" style="align-items:center; gap:.75rem; flex-wrap:wrap">
                   <input type="text" id="lpr-rtsp-url" placeholder="rtsp://10.126.59.120:8554/live/live1" value="rtsp://10.126.59.120:8554/live/live1" style="flex:1; min-width:260px">
@@ -138,6 +152,7 @@
                   <div id="lpr-rtsp-debug" class="section-desc model-warn" style="margin-bottom:.5rem">预览未加载</div>
                   <img id="lpr-rtsp-video" class="rtsp-preview-img" alt="RTSP 预览">
                 </div>
+                <video id="lpr-video" class="source-video" autoplay playsinline muted hidden></video>
                 <video id="lpr-video-output" class="source-video" controls playsinline muted hidden></video>
                 <canvas id="lpr-canvas" hidden></canvas>
               </div>
@@ -210,7 +225,7 @@
               </div>
               <div class="lpr-actions">
                 <button class="btn primary" onclick="App.startStream('police')">📹 摄像头实时识别</button>
-                <button class="btn" onclick="App.stopStream()">停止视频/摄像头</button>
+                <button class="btn" onclick="App.stopStream('police')">停止视频/摄像头</button>
               </div>
               <div class="stream-url-row">
                 <select id="police-pose-backend">
@@ -273,7 +288,11 @@
               </div>
               <button class="btn" onclick="document.getElementById('owner-file').click()">上传图片/视频</button>
               <button class="btn primary" onclick="App.startStream('owner')">📹 实时手势控制</button>
-              <button class="btn" onclick="App.stopStream()">停止</button>
+              <button class="btn" onclick="App.stopStream('owner')">停止</button>
+              <div class="stream-url-row owner-stream-url-row">
+                <input type="text" id="owner-stream-url" placeholder="rtsp://... 或 http://手机IP:4747/video">
+                <button class="btn" onclick="App.startUrlStream('owner')">连接网络流</button>
+              </div>
               <video id="owner-video" autoplay playsinline muted hidden></video>
               <canvas id="owner-canvas" hidden></canvas>
               <div id="owner-gestures" class="gesture-ref"></div>
@@ -310,120 +329,78 @@
         <section id="view-alerts" class="view">
           <h2>告警中心</h2>
 
-          <!-- 三模块联合实时识别：独立于各模块原有单路入口 -->
-          <div class="panel joint-recognition-panel" id="joint-recognition-panel">
-            <div class="panel-header-row joint-recognition-header">
+          <!-- 识别模块镜像：仅展示三个原模块当前画面与结果，不重复采集或识别 -->
+          <div class="panel recognition-mirror-panel" id="recognition-mirror-panel">
+            <div class="panel-header-row recognition-mirror-header">
               <div>
-                <h3>三模块联合实时识别</h3>
-                <p class="hint">车牌、交警手势、车主控车可共享同一摄像头，也可分别连接 USB、内置、DroidCam 或 RTSP/RTMP/HTTP 网络流。</p>
-              </div>
-              <div class="joint-run-actions">
-                <span class="joint-run-state" id="joint-run-state" data-state="idle">未启动</span>
-                <button class="btn small" id="joint-refresh-devices" type="button" onclick="App.refreshJointCameraDevices(true)">授权并刷新摄像头</button>
-                <button class="btn primary small" id="joint-start-btn" type="button" onclick="App.startJointRecognition()">统一启动</button>
-                <button class="btn small" id="joint-stop-btn" type="button" onclick="App.stopJointRecognition()" disabled>全部停止</button>
+                <h3>识别模块实时画面</h3>
+                <p class="hint">这里只镜像车牌识别、交警手势和车主控车模块当前正在识别的画面与结果，请在对应模块中选择来源并启动或停止识别。</p>
               </div>
             </div>
 
-            <div class="joint-control-bar">
-              <label>
-                来源分配
-                <select id="joint-source-mode" onchange="App.onJointSourceModeChange()">
-                  <option value="shared">三模块共享同一来源</option>
-                  <option value="independent">三模块分别配置</option>
-                </select>
-              </label>
-              <label>
-                识别帧率
-                <input id="joint-target-fps" type="number" min="1" max="15" step="1" value="5" aria-label="联合识别目标帧率">
-                <span>FPS</span>
-              </label>
-              <span class="joint-source-help">DroidCam USB/Wi-Fi 客户端请选“浏览器摄像头”；手机直连地址请选“网络流 URL”。</span>
-            </div>
-
-            <div class="joint-source-grid" id="joint-source-grid">
-              <article class="joint-source-card" data-module="lpr">
-                <div class="joint-source-head">
+            <div class="recognition-mirror-grid" id="recognition-mirror-grid">
+              <article class="recognition-mirror-card" data-module="lpr">
+                <div class="mirror-card-head">
                   <strong>🚘 车牌识别</strong>
-                  <span class="joint-channel-state" id="joint-lpr-status" data-state="idle">待启动</span>
+                  <span class="mirror-status" id="mirror-lpr-status" data-state="idle">未运行</span>
                 </div>
-                <div class="joint-source-fields">
-                  <label>来源类型
-                    <select id="joint-lpr-kind" onchange="App.onJointSourceKindChange('lpr')">
-                      <option value="local">浏览器摄像头</option>
-                      <option value="network">RTSP / RTMP / HTTP 网络流</option>
-                    </select>
-                  </label>
-                  <label class="joint-device-field" id="joint-lpr-device-field">摄像头
-                    <select id="joint-lpr-device" onchange="App.onJointSourceConfigChange('lpr')"><option value="">系统默认摄像头</option></select>
-                  </label>
-                  <label class="joint-url-field hidden" id="joint-lpr-url-field">网络流地址
-                    <input id="joint-lpr-url" type="url" placeholder="rtsp://... 或 http://手机IP:4747/video" oninput="App.onJointSourceConfigChange('lpr')">
-                  </label>
+                <div class="mirror-source" id="mirror-lpr-source">来源：车牌识别模块</div>
+                <div class="mirror-preview">
+                  <img id="mirror-lpr-image" alt="车牌识别实时画面" hidden>
+                  <span class="mirror-placeholder" id="mirror-lpr-placeholder">请在车牌识别模块启动识别</span>
                 </div>
-                <div class="joint-source-binding" id="joint-lpr-binding">主来源 · 等待配置</div>
-                <div class="joint-preview">
-                  <video id="joint-lpr-video" muted playsinline></video>
-                  <img id="joint-lpr-image" alt="车牌识别实时画面" hidden>
-                  <span id="joint-lpr-placeholder">等待启动预览</span>
-                </div>
-                <div class="joint-latest-result" id="joint-lpr-result">尚无识别结果</div>
+                <div class="mirror-result" id="mirror-lpr-result">尚无识别结果</div>
               </article>
 
-              <article class="joint-source-card" data-module="police">
-                <div class="joint-source-head">
+              <article class="recognition-mirror-card" data-module="police">
+                <div class="mirror-card-head">
                   <strong>👮 交警手势</strong>
-                  <span class="joint-channel-state" id="joint-police-status" data-state="idle">待启动</span>
+                  <span class="mirror-status" id="mirror-police-status" data-state="idle">未运行</span>
                 </div>
-                <div class="joint-source-fields">
-                  <label>来源类型
-                    <select id="joint-police-kind" onchange="App.onJointSourceKindChange('police')">
-                      <option value="local">浏览器摄像头</option>
-                      <option value="network">RTSP / RTMP / HTTP 网络流</option>
-                    </select>
-                  </label>
-                  <label class="joint-device-field" id="joint-police-device-field">摄像头
-                    <select id="joint-police-device" onchange="App.onJointSourceConfigChange('police')"><option value="">系统默认摄像头</option></select>
-                  </label>
-                  <label class="joint-url-field hidden" id="joint-police-url-field">网络流地址
-                    <input id="joint-police-url" type="url" placeholder="rtsp://... 或 http://手机IP:4747/video" oninput="App.onJointSourceConfigChange('police')">
-                  </label>
+                <div class="mirror-source" id="mirror-police-source">来源：交警手势模块</div>
+                <div class="mirror-preview">
+                  <img id="mirror-police-image" alt="交警手势识别实时画面" hidden>
+                  <span class="mirror-placeholder" id="mirror-police-placeholder">请在交警手势模块启动识别</span>
                 </div>
-                <div class="joint-source-binding" id="joint-police-binding">跟随主来源</div>
-                <div class="joint-preview">
-                  <video id="joint-police-video" muted playsinline></video>
-                  <img id="joint-police-image" alt="交警手势识别实时画面" hidden>
-                  <span id="joint-police-placeholder">等待启动预览</span>
-                </div>
-                <div class="joint-latest-result" id="joint-police-result">尚无识别结果</div>
+                <div class="mirror-result" id="mirror-police-result">尚无识别结果</div>
               </article>
 
-              <article class="joint-source-card" data-module="owner">
-                <div class="joint-source-head">
+              <article class="recognition-mirror-card" data-module="owner">
+                <div class="mirror-card-head">
                   <strong>🤚 车主控车</strong>
-                  <span class="joint-channel-state" id="joint-owner-status" data-state="idle">待启动</span>
+                  <span class="mirror-status" id="mirror-owner-status" data-state="idle">未运行</span>
                 </div>
-                <div class="joint-source-fields">
-                  <label>来源类型
-                    <select id="joint-owner-kind" onchange="App.onJointSourceKindChange('owner')">
-                      <option value="local">浏览器摄像头</option>
-                      <option value="network">RTSP / RTMP / HTTP 网络流</option>
-                    </select>
-                  </label>
-                  <label class="joint-device-field" id="joint-owner-device-field">摄像头
-                    <select id="joint-owner-device" onchange="App.onJointSourceConfigChange('owner')"><option value="">系统默认摄像头</option></select>
-                  </label>
-                  <label class="joint-url-field hidden" id="joint-owner-url-field">网络流地址
-                    <input id="joint-owner-url" type="url" placeholder="rtsp://... 或 http://手机IP:4747/video" oninput="App.onJointSourceConfigChange('owner')">
-                  </label>
+                <div class="mirror-source" id="mirror-owner-source">来源：车主控车模块</div>
+                <div class="mirror-preview">
+                  <img id="mirror-owner-image" alt="车主手势识别实时画面" hidden>
+                  <span class="mirror-placeholder" id="mirror-owner-placeholder">请在车主控车模块启动识别</span>
                 </div>
-                <div class="joint-source-binding" id="joint-owner-binding">跟随主来源</div>
-                <div class="joint-preview">
-                  <video id="joint-owner-video" muted playsinline></video>
-                  <img id="joint-owner-image" alt="车主手势识别实时画面" hidden>
-                  <span id="joint-owner-placeholder">等待启动预览</span>
+                <div class="mirror-result" id="mirror-owner-result">尚无识别结果</div>
+
+                <div class="mirror-vehicle-state" aria-label="汽车状态">
+                  <div class="mirror-vehicle-head">
+                    <strong>汽车状态</strong>
+                    <span class="mirror-awake" id="mirror-owner-awake">休眠</span>
+                  </div>
+                  <div class="mirror-vehicle-metrics">
+                    <div class="mirror-metric">
+                      <div class="mirror-metric-label"><span>音量</span><strong id="mirror-owner-volume">50</strong></div>
+                      <div class="mirror-meter" aria-hidden="true"><span id="mirror-owner-volume-fill" style="width:50%"></span></div>
+                    </div>
+                    <div class="mirror-metric">
+                      <div class="mirror-metric-label"><span>空调温度</span><strong id="mirror-owner-temperature">24°C</strong></div>
+                      <div class="mirror-meter temperature" aria-hidden="true"><span id="mirror-owner-temperature-fill" style="width:50%"></span></div>
+                    </div>
+                    <div class="mirror-phone-row"><span>电话</span><strong class="mirror-phone idle" id="mirror-owner-phone">空闲</strong></div>
+                  </div>
+                  <div class="mirror-selection-row">当前选择：<strong id="mirror-owner-selection">等待状态</strong></div>
+                  <div class="mirror-control-grid" aria-label="四个可选调节模块">
+                    <span class="mirror-control-chip" data-control="volume_up" aria-current="false">音量 +</span>
+                    <span class="mirror-control-chip" data-control="volume_down" aria-current="false">音量 -</span>
+                    <span class="mirror-control-chip" data-control="temp_up" aria-current="false">温度 +</span>
+                    <span class="mirror-control-chip" data-control="temp_down" aria-current="false">温度 -</span>
+                  </div>
                 </div>
-                <div class="joint-latest-result" id="joint-owner-result">尚无识别结果</div>
               </article>
             </div>
           </div>
@@ -803,7 +780,7 @@
         </div>
       </div>
     </div>
-  <script src="/static/js/app.js?v=20260713-joint1"></script>
-  <script src="/static/js/monitoring-workbench.js?v=20260713-joint1"></script>
+  <script src="/static/js/app.js?v=20260713-mirror2"></script>
+  <script src="/static/js/monitoring-workbench.js?v=20260713-mirror2"></script>
 </body>
 </html>
