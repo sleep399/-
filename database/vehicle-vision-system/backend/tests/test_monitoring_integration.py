@@ -41,6 +41,20 @@ def test_monitoring_public_api_surface_is_registered():
     assert required <= paths
 
 
+def test_scenario_api_surface_is_registered():
+    from app.routers.scenario import router as scenario_router
+
+    paths = {route.path for route in scenario_router.routes if hasattr(route, "path")}
+    required = {
+        "/api/scenario/snapshot",
+        "/api/scenario/advice",
+        "/api/scenario/conflicts",
+        "/api/scenario/evaluate",
+        "/api/scenario/conflicts/{conflict_id}/resolve",
+    }
+    assert required <= paths
+
+
 def test_alert_agent_persists_stats_and_replay_without_llm_network():
     db = _memory_session()
     try:
@@ -125,7 +139,8 @@ def test_assistant_api_reports_real_llm_or_template_fallback_mode():
     source = (BACKEND_DIR / "app" / "routers" / "monitor.py").read_text(encoding="utf-8")
     service = (BACKEND_DIR / "app" / "services" / "llm_service.py").read_text(encoding="utf-8")
     assert '"ai": {' in source
-    assert '"mode": getattr(llm_service, "last_assistant_mode", "template")' in source
+    assert "last_assistant_mode" in source
+    assert '"hint": ai_hint' in source
     assert 'self.last_assistant_mode = "llm"' in service
     assert 'self.last_assistant_mode = "template"' in service
     assert "await alert_agent.handle_llm_failure(" in service
