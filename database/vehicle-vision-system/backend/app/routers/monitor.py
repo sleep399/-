@@ -16,6 +16,7 @@ from app.models.logs import SystemLog
 from app.schemas import AlertResponse, LogResponse
 from app.services.alert_agent import alert_agent, EVENT_TYPES, DEFAULT_LEVELS
 from app.services.llm_service import llm_service
+from app.services.scenario_fusion_service import scenario_fusion_service
 from app.services.log_stream import register as register_log_sse, unregister as unregister_log_sse, client_count as log_stream_client_count
 from app.utils.logger import write_log, get_logger, localize_utc, level_to_cn, level_filter_variants
 from app.utils.log_display import format_log_entry, category_cn, sanitize_log_message
@@ -33,6 +34,11 @@ router = APIRouter(prefix="/api/monitor", tags=["监控与告警"])
 monitor_logger = get_logger("monitor")
 
 
+class HistoryMessage(BaseModel):
+    role: str
+    content: str
+
+
 class AssistantQuery(BaseModel):
     question: str
     event_type: str | None = None
@@ -40,6 +46,7 @@ class AssistantQuery(BaseModel):
     ip: str | None = None
     alert_id: int | None = None
     intent: str | None = None
+    history: list[HistoryMessage] | None = None
 
 
 class MarkResolvedRequest(BaseModel):
@@ -667,6 +674,11 @@ async def assistant_chat(payload: AssistantQuery, db: Session = Depends(get_db))
     }
 
     intent = payload.intent or detect_assistant_intent(payload.question)
+    if intent == "driving" or any(
+        k in (payload.question or "")
+        for k in ("综合驾驶", "融合建议", "三路感知", "怎么开", "前方交警")
+    ):
+        context["driving_advice"] = await scenario_fusion_service.get_driving_advice()
     has_alert_context = bool(
         payload.alert_id
         and context.get("title")
@@ -695,15 +707,29 @@ async def assistant_chat(payload: AssistantQuery, db: Session = Depends(get_db))
             "intent": intent,
         }
 
-    answer = await llm_service.ask_assistant(payload.question, context, intent=intent)
+    answer = await llm_service.ask_assistant(
+        payload.question,
+        context,
+        intent=intent,
+        history=[{"role": h.role, "content": h.content} for h in (payload.history or [])],
+    )
+    ai_mode = getattr(llm_service, "last_assistant_mode", "template")
+    ai_reason = getattr(llm_service, "last_assistant_reason", "")
+    ai_hint = ""
+    if ai_mode == "template":
+        if ai_reason == "not_configured":
+            ai_hint = "未配置 LLM_API_KEY，当前为本地模板回答。"
+        elif ai_reason == "api_error":
+            ai_hint = "大模型调用失败，已降级为本地模板；请检查 API Key 与网络。"
     return {
         "answer": answer,
         "context": context,
         "needs_clarification": False,
         "intent": intent,
         "ai": {
-            "mode": getattr(llm_service, "last_assistant_mode", "template"),
-            "reason": getattr(llm_service, "last_assistant_reason", ""),
+            "mode": ai_mode,
+            "reason": ai_reason,
+            "hint": ai_hint,
             "configured": settings.llm_configured,
             "provider": settings.llm_provider_label,
             "model": settings.effective_llm_model,
