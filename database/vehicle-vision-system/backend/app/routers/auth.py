@@ -5,6 +5,7 @@ from io import BytesIO
 import qrcode
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User, VerificationCode, WechatLoginSession
@@ -31,7 +32,11 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
     )
     vc.used = True
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "用户名或邮箱已被占用，请更换后重试") from exc
     write_log(db, "user", f"用户注册: {data.username}")
     token = create_access_token({"sub": user.username})
     return Token(access_token=token)

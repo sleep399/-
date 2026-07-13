@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
 from app.database import engine, init_db
+from app.models.user import User
 from app.routers.auth import router as auth_router
 from app.services.auth_email import EmailDeliveryError, send_verification_email
 
@@ -152,6 +153,12 @@ class AuthenticationFlowTests(unittest.TestCase):
         ):
             with self.assertRaises(EmailDeliveryError):
                 send_verification_email("recipient@example.com", "123456", "login")
+
+    def test_phone_unique_index_allows_multiple_null_values(self):
+        phone_index = next(index for index in User.__table__.indexes if index.name == "ix_users_phone")
+        self.assertTrue(phone_index.unique)
+        self.assertIsNotNone(phone_index.dialect_options["mssql"]["where"])
+        self.assertIsNotNone(phone_index.dialect_options["sqlite"]["where"])
 
     def test_wechat_scan_confirmation_login(self):
         created = self.client.post("/api/auth/wechat/qrcode")

@@ -74,9 +74,38 @@ def _migrate_legacy_mssql_users() -> None:
             logger.info("Merged and dropped duplicate HashedPassword on %s", table)
 
 
+def _migrate_mssql_nullable_phone_index() -> None:
+    """允许多个空手机号，同时继续保证非空手机号唯一。"""
+    if engine.dialect.name != "mssql":
+        return
+
+    insp = inspect(engine)
+    table_names = {name.lower(): name for name in insp.get_table_names()}
+    if "users" not in table_names:
+        return
+
+    table = table_names["users"]
+    phone_index = next(
+        (index for index in insp.get_indexes(table) if index["name"].lower() == "ix_users_phone"),
+        None,
+    )
+    if phone_index and phone_index.get("dialect_options", {}).get("mssql_where") is not None:
+        return
+
+    with engine.begin() as conn:
+        if phone_index:
+            conn.execute(text(f"DROP INDEX [ix_users_phone] ON [{table}]"))
+        conn.execute(text(
+            f"CREATE UNIQUE INDEX [ix_users_phone] ON [{table}] ([phone]) "
+            "WHERE [phone] IS NOT NULL"
+        ))
+    logger.info("Recreated users phone index as a filtered unique index")
+
+
 def _migrate_schema() -> None:
     """为已有数据库补充缺失列（兼容 SQL Server / SQLite）。"""
     _migrate_legacy_mssql_users()
+    _migrate_mssql_nullable_phone_index()
 
     insp = inspect(engine)
     dialect = engine.dialect.name
