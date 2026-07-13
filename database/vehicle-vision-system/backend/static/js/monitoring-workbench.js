@@ -41,6 +41,7 @@
   agentMonitorTimer: null,
   agentBriefing: null,
   agentLastBriefKey: '',
+  _lastAgentDrivingAdviceKey: '',
   focusedAlert: null,
   currentView: '',
   logSseSource: null,
@@ -77,6 +78,9 @@
     email_delivery_failure: '邮件推送失败',
     config_missing: '关键配置缺失',
     test_event: '测试告警',
+    scenario_conflict_detected: '多路感知场景冲突',
+    fusion_recommendation_issued: '融合处置建议已下发',
+    owner_action_suppressed: '车主控车动作已抑制',
   },
   AGENT_LEVEL_LABELS: { info: '提示', warning: '警告', critical: '严重' },
   ALERT_LEVEL_LABELS: { info: '提示', warning: '警告', critical: '严重' },
@@ -169,12 +173,17 @@
     return status === 'resolved' ? '已处理' : (status === 'open' ? '未处理' : (status || '未知'));
   },
 
-  /** 构建助手请求：仅携带用户显式选定的告警，不再静默绑定「最近一条」 */
+  /** 构建助手请求：携带显式告警上下文与近期对话历史 */
   buildAssistantPayload(question, intent = null) {
     const body = { question };
     if (intent) body.intent = intent;
     const alertId = this.getExplicitAlertId();
     if (alertId) body.alert_id = alertId;
+    const history = this.assistantHistory.slice(-10).map(msg => ({
+      role: msg.role,
+      content: msg.content,
+    }));
+    if (history.length) body.history = history;
     return body;
   },
 
@@ -240,8 +249,7 @@
   // ── WebSocket & SSE ──
   connectAlertWs() {
     if (this.wsAlerts && this.wsAlerts.readyState === WebSocket.OPEN) return;
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    this.wsAlerts = new WebSocket(`${proto}://${location.host}/ws/alerts`);
+    this.wsAlerts = new WebSocket(`${this.wsBase()}/ws/alerts`);
     this.wsAlerts.onmessage = (e) => {
       const data = JSON.parse(e.data);
       if (data.type === 'alert') {
@@ -260,7 +268,7 @@
 
   connectSSE() {
     if (this.sseSource) return;
-    this.sseSource = new EventSource('/api/monitor/stream');
+    this.sseSource = new EventSource(this.apiUrl('/api/monitor/stream'));
     this.sseSource.onopen = () => {
       document.getElementById('stat-sse-conn') && (document.getElementById('stat-sse-conn').textContent = '1');
     };
@@ -1272,7 +1280,7 @@
     if (this.logSseSource) return;
     const statusEl = document.getElementById('log-stream-status');
     const btn = document.getElementById('log-stream-btn');
-    this.logSseSource = new EventSource('/api/monitor/logs/stream');
+    this.logSseSource = new EventSource(this.apiUrl('/api/monitor/logs/stream'));
     this.logSseSource.onopen = () => {
       if (statusEl) { statusEl.textContent = '监听中'; statusEl.className = 'conn-status connected'; }
       if (btn) btn.textContent = '停止监听';
@@ -1851,7 +1859,14 @@
     this.refreshAgentStats();
 
     const levelLabel = { info: '提示', warning: '需要注意', critical: '比较紧急' }[level] || '提醒';
-    this.showAgentSpeech(this.alertToUserSpeech(alert), 8000);
+    const deferSpeechForDrivingAdvice = alert.event_type && (
+      alert.event_type.startsWith('scenario_')
+      || alert.event_type.startsWith('fusion_')
+      || alert.event_type === 'owner_action_suppressed'
+    );
+    if (!deferSpeechForDrivingAdvice) {
+      this.showAgentSpeech(this.alertToUserSpeech(alert), 8000);
+    }
 
     const latest = document.getElementById('agent-latest-alert');
     if (latest) {
@@ -1870,6 +1885,15 @@
     const alertMsg = `🔔 ${levelLabel}提醒\n${userLines.join('\n')}`;
     this.addAssistantMessage('assistant', alertMsg);
     this.loadAgentActivity();
+    if (
+      alert.event_type && (
+        alert.event_type.startsWith('scenario_')
+        || alert.event_type.startsWith('fusion_')
+        || alert.event_type === 'owner_action_suppressed'
+      )
+    ) {
+      this.loadScenarioFusion({ fromAlert: true });
+    }
 
     if (level === 'critical') {
       this.toggleAssistant(true);
@@ -1991,6 +2015,7 @@
     const q = typeof question === 'string' ? question : (input && input.value && input.value.trim());
     if (!q || this.assistantThinking) return;
 
+    const body = this.buildAssistantPayload(q, intent);
     this.addAssistantMessage('user', q);
     if (input) input.value = '';
     this.assistantThinking = true;
@@ -2001,17 +2026,17 @@
     if (panel) panel.classList.add('assistant-processing');
 
     try {
-      const body = this.buildAssistantPayload(q, intent);
       const data = await this.api('/api/monitor/assistant', { method: 'POST', body: JSON.stringify(body) });
       const answer = data.answer || '我暂时没想好怎么说，您可以换个方式问问，或者先点「立即巡检」。';
       this.addAssistantMessage('assistant', answer);
       const aiMode = data.ai?.mode === 'llm' ? `${data.ai.provider || 'AI'} · ${data.ai.model || '大模型'}` : '本地模板降级';
+      const aiHint = data.ai?.hint ? ` · ${data.ai.hint}` : '';
       if (data.needs_clarification) {
         this.setAssistantStatus('请先选定一条告警');
       } else if (this.focusedAlert) {
-        this.setAssistantStatus(`正在讨论：${this.focusedAlert.title} · ${aiMode}`);
+        this.setAssistantStatus(`正在讨论：${this.focusedAlert.title} · ${aiMode}${aiHint}`);
       } else {
-        this.setAssistantStatus(`回答完成 · ${aiMode}`);
+        this.setAssistantStatus(`回答完成 · ${aiMode}${aiHint}`);
       }
       this.setAgentState('idle');
       if (this.assistantVoiceEnabled) this.speakAssistant(answer);
@@ -2111,6 +2136,177 @@
   speakLastAnswer() {
     const last = [...this.assistantHistory].reverse().find(msg => msg.role === 'assistant');
     if (last) this.speakAssistant(last.content, { force: true });
+  },
+
+  isIdleDrivingAdvice(advice) {
+    if (!advice || !advice.advice) return true;
+    const text = String(advice.advice).trim();
+    if (!text || text === '暂无建议') return true;
+    return text.includes('暂无明显驾驶相关信号');
+  },
+
+  notifyAgentDrivingAdvice(advice, opts = {}) {
+    if (this.isIdleDrivingAdvice(advice)) return;
+    const text = String(advice.advice).trim();
+    const key = `${text}|${advice.signals_summary || ''}`;
+    const force = opts.force === true;
+    if (!force && key === this._lastAgentDrivingAdviceKey) return;
+    this._lastAgentDrivingAdviceKey = key;
+
+    const priority = advice.priority || 'normal';
+    const duration = priority === 'high' ? 10000 : (priority === 'medium' ? 8000 : 6000);
+    const speech = advice.signals_summary
+      ? `🧭 ${text}\n信号：${advice.signals_summary}`
+      : `🧭 ${text}`;
+
+    if (priority === 'high') {
+      this.setAgentState('warning');
+      this.toggleAssistant(true);
+    } else if (priority === 'medium') {
+      this.setAgentState('info');
+    }
+    this.showAgentSpeech(speech, duration);
+
+    const latest = document.getElementById('agent-latest-alert');
+    if (latest) {
+      const levelClass = priority === 'high' ? 'warning' : (priority === 'medium' ? 'info' : 'info');
+      latest.className = 'agent-latest-alert ' + levelClass;
+      latest.innerHTML = `<strong>综合驾驶建议</strong>${this.escHtml(text)}${advice.signals_summary ? '<br><em>信号：' + this.escHtml(advice.signals_summary) + '</em>' : ''}<br><span class="agent-latest-hint">多路感知融合 · 点击查看告警中心</span>`;
+      latest.classList.remove('hidden');
+      latest.onclick = () => {
+        const panel = document.getElementById('scenario-fusion-panel');
+        if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      };
+      latest.title = '查看多路感知融合建议';
+    }
+
+    const subtitle = document.getElementById('agent-subtitle');
+    if (subtitle) subtitle.textContent = '刚生成：综合驾驶建议';
+  },
+
+  async loadScenarioFusion(opts = {}) {
+    try {
+      const [snapshot, conflicts, advice] = await Promise.all([
+        this.api('/api/scenario/snapshot'),
+        this.api('/api/scenario/conflicts?limit=10'),
+        this.api('/api/scenario/advice'),
+      ]);
+      this.renderScenarioSnapshot(snapshot);
+      this.renderScenarioDrivingAdvice(advice);
+      this.notifyAgentDrivingAdvice(advice, { force: opts.fromAlert || advice.cached === false });
+      this.renderScenarioConflicts(conflicts.items || []);
+    } catch (e) {
+      const snapEl = document.getElementById('scenario-snapshot');
+      if (snapEl) snapEl.innerHTML = `<p class="hint">多路感知数据加载失败：${this.escHtml(e.message)}</p>`;
+    }
+  },
+
+  renderScenarioSnapshot(snapshot) {
+    const el = document.getElementById('scenario-snapshot');
+    if (!el || !snapshot) return;
+    const lpr = snapshot.lpr || {};
+    const police = snapshot.police || {};
+    const owner = snapshot.owner || {};
+    const plates = this.formatPlateLabels(lpr.plates).slice(0, 3).join('、') || '—';
+    const ownerMain = owner.action_cn || owner.action || owner.gesture_cn || owner.gesture || '—';
+    const ownerSub = owner.action
+      ? (owner.gesture_cn || owner.gesture || '—')
+      : (owner.gesture_cn || owner.gesture ? '未触发控车动作' : '—');
+    const suppressed = snapshot.owner_suppressed
+      ? `<span class="scenario-badge warning">车主动作已抑制</span>`
+      : '';
+    el.innerHTML = `
+      <div class="scenario-signal-card">
+        <span class="scenario-signal-label">车牌</span>
+        <strong>${lpr.plate_count || 0} 个</strong>
+        <small>${this.escHtml(plates)}</small>
+      </div>
+      <div class="scenario-signal-card">
+        <span class="scenario-signal-label">交警</span>
+        <strong>${this.escHtml(police.gesture_cn || police.gesture || '—')}</strong>
+        <small>${police.confidence != null ? (police.confidence * 100).toFixed(0) + '%' : '—'}</small>
+      </div>
+      <div class="scenario-signal-card">
+        <span class="scenario-signal-label">车主</span>
+        <strong>${this.escHtml(ownerMain)}</strong>
+        <small>${this.escHtml(ownerSub)}</small>
+      </div>
+      <div class="scenario-signal-card scenario-meta-card">
+        <span class="scenario-signal-label">窗口</span>
+        <strong>${snapshot.window_seconds || 30}s</strong>
+        <small>未处理冲突 ${snapshot.open_conflicts || 0} 条 ${suppressed}</small>
+      </div>`;
+    this._lastScenarioSnapshot = snapshot;
+  },
+
+  renderScenarioDrivingAdvice(advice) {
+    const el = document.getElementById('scenario-driving-advice');
+    if (!el || !advice) return;
+    const modeLabel = advice.mode === 'llm' ? 'LLM 融合推理' : '规则模板';
+    const priority = advice.priority || 'normal';
+    const signals = advice.signals_summary || '—';
+    el.innerHTML = `
+      <div class="scenario-advice-card ${priority}">
+        <div class="scenario-advice-head">
+          <strong>🧭 综合驾驶建议</strong>
+          <span class="scenario-badge ${priority === 'high' ? 'critical' : priority}">${this.escHtml(modeLabel)}</span>
+        </div>
+        <p class="scenario-advice-text">${this.escHtml(advice.advice || '暂无建议')}</p>
+        <small class="scenario-advice-meta">信号：${this.escHtml(signals)}</small>
+      </div>`;
+  },
+
+  formatPlateLabels(plates) {
+    if (!Array.isArray(plates)) return [];
+    return plates.map(p => {
+      if (typeof p === 'string') return p.trim();
+      if (p && typeof p === 'object') {
+        return String(p.plate_number || p.plate || p.text || p.number || '').trim();
+      }
+      return '';
+    }).filter(Boolean);
+  },
+
+  renderScenarioConflicts(items) {
+    const el = document.getElementById('scenario-conflicts');
+    if (!el) return;
+    const hint = (this._lastScenarioSnapshot && this._lastScenarioSnapshot.fusion_status_hint) || '';
+    if (!items.length) {
+      el.innerHTML = `<p class="hint">${this.escHtml(hint || '近期无场景冲突，三路感知信号一致。')}</p>`;
+      return;
+    }
+    el.innerHTML = items.map(c => {
+      const status = c.status === 'open' ? '未处理' : '已处理';
+      const sev = c.severity || 'warning';
+      const resolveBtn = c.status === 'open'
+        ? `<button class="btn small" onclick="App.resolveScenarioConflict(${c.id})">确认处置</button>`
+        : '';
+      const alertLink = c.alert_id
+        ? `<button class="btn small" onclick="App.viewReplay(${c.alert_id})">查看告警</button>`
+        : '';
+      return `<div class="scenario-conflict-card ${sev}">
+        <div class="scenario-conflict-head">
+          <strong>${this.escHtml(c.conflict_type || '场景冲突')}</strong>
+          <span class="scenario-badge ${sev}">${this.escHtml(status)}</span>
+        </div>
+        <p class="scenario-fusion-text">💡 ${this.escHtml(c.fusion_recommendation || '')}</p>
+        <div class="scenario-conflict-actions">${resolveBtn}${alertLink}</div>
+      </div>`;
+    }).join('');
+  },
+
+  async resolveScenarioConflict(conflictId) {
+    try {
+      await this.api(`/api/scenario/conflicts/${conflictId}/resolve`, {
+        method: 'POST',
+        body: JSON.stringify({ resolution_note: '已按融合建议处置' }),
+      });
+      await this.loadScenarioFusion();
+      await this.loadAlerts();
+      this.showAgentSpeech('场景冲突已确认处置，车主动作抑制已解除', 5000);
+    } catch (e) {
+      alert(e.message);
+    }
   },
   });
 })();
