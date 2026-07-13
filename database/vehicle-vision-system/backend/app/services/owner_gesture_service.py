@@ -69,7 +69,7 @@ class OwnerGestureService:
 
     # 浏览器预览和上传到后端的画面都未做水平翻转，直接采用图像坐标方向。
     # 若此处再次镜像，会造成“向左指识别为向右指”。
-    MIRROR_POINT_DIRECTIONS = True
+    MIRROR_POINT_DIRECTIONS = False
     REALTIME_DYNAMIC_WINDOW_SEC = 1.0
     REALTIME_DYNAMIC_MIN_SCORE = {
         "wave": 1.05,
