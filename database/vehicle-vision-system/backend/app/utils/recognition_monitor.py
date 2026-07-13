@@ -8,19 +8,34 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Awaitable
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.services.alert_agent import alert_agent
+from app.services.scenario_fusion_service import scenario_fusion_service
 from app.utils.logger import write_log
 from app.utils.log_display import humanize_error_text
+
+monitor_logger = logging.getLogger("vehicle-vision.recognition-monitor")
+
+
+async def _observe_scenario(awaitable: Awaitable[Any]) -> None:
+    """融合建议是旁路能力；异常不能反向中断原识别流程。"""
+    try:
+        await awaitable
+    except Exception as exc:
+        monitor_logger.warning("场景融合旁路采集失败: %s", exc)
+
 
 async def record_lpr_recognition(
     db: Session,
     *,
     success: bool,
     source: str,
+    source_id: str | None = None,
     plate_count: int = 0,
     plates: list | None = None,
     model_available: bool | None = None,
@@ -34,6 +49,8 @@ async def record_lpr_recognition(
         "plate_count": plate_count,
         "success": success,
     }
+    if source_id is not None:
+        detail["source_id"] = source_id
     if plates is not None:
         detail["plates"] = plates
     if model_available is not None:
@@ -57,14 +74,25 @@ async def record_lpr_recognition(
         message = f"[{source}] 未识别到有效车牌"
 
     write_log(db, "lpr", message, level=level, detail=detail, user_id=user_id)
-    alert_agent.record_lpr_result(success)
-    await alert_agent.check_and_alert(db, "lpr")
+    alert_agent.record_lpr_result(success, user_id=user_id)
+    await alert_agent.check_and_alert(db, "lpr", user_id=user_id)
+    await _observe_scenario(scenario_fusion_service.ingest_lpr(
+        db,
+        success=success,
+        plate_count=plate_count,
+        plates=plates,
+        source=source,
+        source_id=source_id,
+        evaluate_conflicts=False,
+        user_id=user_id,
+    ))
 
 
 async def record_police_recognition(
     db: Session,
     *,
     source: str,
+    source_id: str | None = None,
     gesture_cn: str | None = None,
     confidence: float = 0.0,
     gesture: str | None = None,
@@ -77,6 +105,8 @@ async def record_police_recognition(
         "source": source,
         "confidence": confidence,
     }
+    if source_id is not None:
+        detail["source_id"] = source_id
     if gesture:
         detail["gesture"] = gesture
     if gesture_cn:
@@ -87,21 +117,33 @@ async def record_police_recognition(
     if error:
         level = "ERROR"
         message = f"[{source}] 识别失败: {humanize_error_text(error)}"
-        alert_agent.record_gesture_failure("police")
+        alert_agent.record_gesture_failure("police", user_id=user_id)
     else:
         label = gesture_cn or "无手势"
         level = "WARN" if confidence < 0.4 else "INFO"
         message = f"[{source}] 识别手势: {label} ({confidence:.0%})"
-        alert_agent.record_gesture_confidence("police", confidence)
+        alert_agent.record_gesture_confidence("police", confidence, user_id=user_id)
 
     write_log(db, "police_gesture", message, level=level, detail=detail, user_id=user_id)
-    await alert_agent.check_and_alert(db, "police")
+    await alert_agent.check_and_alert(db, "police", user_id=user_id)
+    if gesture and not error:
+        await _observe_scenario(scenario_fusion_service.ingest_police(
+            db,
+            gesture=gesture,
+            gesture_cn=gesture_cn,
+            confidence=confidence,
+            source=source,
+            source_id=source_id,
+            evaluate_conflicts=False,
+            user_id=user_id,
+        ))
 
 
 async def record_owner_recognition(
     db: Session,
     *,
     source: str,
+    source_id: str | None = None,
     gesture_cn: str | None = None,
     confidence: float = 0.0,
     gesture: str | None = None,
@@ -118,6 +160,8 @@ async def record_owner_recognition(
         "source": source,
         "confidence": confidence,
     }
+    if source_id is not None:
+        detail["source_id"] = source_id
     if gesture:
         detail["gesture"] = gesture
     if gesture_cn:
@@ -134,26 +178,38 @@ async def record_owner_recognition(
     if error:
         level = "ERROR"
         message = f"[{source}] 识别失败: {humanize_error_text(error)}"
-        alert_agent.record_gesture_failure("owner")
+        alert_agent.record_gesture_failure("owner", user_id=user_id)
     elif needs_confirmation:
         level = "WARN"
         message = f"[{source}] 待确认低置信度手势: {gesture_cn or '未知'} ({confidence:.0%})"
-        alert_agent.record_gesture_confidence("owner", confidence)
+        alert_agent.record_gesture_confidence("owner", confidence, user_id=user_id)
     elif action:
         level = "INFO"
         message = f"[{source}] 手势触发: {gesture_cn or gesture or '未知'} -> {action}"
-        alert_agent.record_gesture_confidence("owner", confidence)
+        alert_agent.record_gesture_confidence("owner", confidence, user_id=user_id)
     elif gesture in (None, "no_gesture") or confidence < 0.35:
         level = "WARN"
         message = f"[{source}] 未识别到有效手势"
-        alert_agent.record_gesture_confidence("owner", confidence)
+        alert_agent.record_gesture_confidence("owner", confidence, user_id=user_id)
     else:
         level = "INFO"
         message = f"[{source}] 识别手势: {gesture_cn or '未知'} ({confidence:.0%})"
-        alert_agent.record_gesture_confidence("owner", confidence)
+        alert_agent.record_gesture_confidence("owner", confidence, user_id=user_id)
 
     write_log(db, "owner_gesture", message, level=level, detail=detail, user_id=user_id)
-    await alert_agent.check_and_alert(db, "owner")
+    await alert_agent.check_and_alert(db, "owner", user_id=user_id)
+    if not error and (action or (gesture and gesture != "no_gesture")):
+        await _observe_scenario(scenario_fusion_service.ingest_owner(
+            db,
+            gesture=gesture,
+            gesture_cn=gesture_cn,
+            action=action,
+            confidence=confidence,
+            source=source,
+            source_id=source_id,
+            evaluate_conflicts=False,
+            user_id=user_id,
+        ))
 
 
 def record_owner_vehicle_state(

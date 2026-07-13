@@ -14,11 +14,13 @@ from app.database import init_db, check_db_connection
 from app.models.user import User
 from app.database import SessionLocal
 from app.utils.auth import hash_password
-from app.routers import auth, lpr, police_gesture, owner_gesture, monitor, websocket
+from app.utils.privacy import protect_email
+from app.routers import auth, lpr, police_gesture, owner_gesture, monitor, websocket, scenario
 from app.services.alert_agent import alert_agent
 from app.services.llm_service import llm_service
 from app.services.lpr_service import lpr_service
 from app.services.lpr_video_service import lpr_video_service
+from app.services.network_stream_hub import network_stream_hub
 from app.services.police_gesture_service import police_gesture_service
 from app.utils.logger import get_logger, write_log, write_system_log
 
@@ -86,9 +88,9 @@ async def lifespan(app: FastAPI):
             db.execute(
                 User.__table__.insert().values(
                     username="admin",
-                    email="admin@demo.com",
                     hashed_password=hash_password("admin123"),
                     is_active=True,
+                    **protect_email("admin@demo.com"),
                 )
             )
             db.commit()
@@ -96,7 +98,11 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
     await alert_agent.start_patrol_loop(SessionLocal)
-    yield
+    try:
+        yield
+    finally:
+        await websocket.cancel_stream_background_tasks()
+        network_stream_hub.close_all()
 
 
 app = FastAPI(
@@ -122,6 +128,7 @@ app.include_router(lpr.router)
 app.include_router(police_gesture.router)
 app.include_router(owner_gesture.router)
 app.include_router(monitor.router)
+app.include_router(scenario.router)
 app.include_router(websocket.router)
 
 static_dir = Path(__file__).resolve().parent.parent / "static"

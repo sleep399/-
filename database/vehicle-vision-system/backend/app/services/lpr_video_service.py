@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import subprocess
 import sys
@@ -16,6 +17,11 @@ import cv2
 import numpy as np
 
 from app.config import settings
+from app.services.network_stream_hub import (
+    NetworkStreamError,
+    NetworkStreamSubscription,
+    network_stream_hub,
+)
 from app.utils.helpers import ndarray_to_base64
 
 logger = logging.getLogger(__name__)
@@ -30,11 +36,12 @@ class LprVideoService:
     def __init__(self) -> None:
         self._error: str | None = None
         self._runtime = None
+        self._runtime_lock = threading.RLock()
         self._yolo_path: str | None = None
         self._lpr_path: str | None = None
-        self._stream_jobs: dict[str, dict[str, Any]] = {}
-        self._stream_lock = threading.Lock()
-        self._preview_jobs: dict[str, dict[str, Any]] = {}
+        self._stream_jobs: dict[tuple[int | None, str], dict[str, Any]] = {}
+        self._stream_lock = threading.RLock()
+        self._preview_jobs: dict[tuple[int | None, str], dict[str, Any]] = {}
         self._rtsp_history_ready: set[str] = set()
 
     def _resolve_weights(self) -> tuple[str, str]:
@@ -43,18 +50,19 @@ class LprVideoService:
         return cfg.yolo_model, cfg.lpr_model
 
     def _load_runtime(self):
-        if self._runtime is not None and self._error is None:
-            return
-        if self._error is not None:
-            return
-        try:
-            from runtime_api import YoloLprRuntime, YoloLprConfig
-            yolo_path, lpr_path = self._resolve_weights()
-            self._yolo_path, self._lpr_path = yolo_path, lpr_path
-            self._runtime = YoloLprRuntime(YoloLprConfig(yolo_model=yolo_path, lpr_model=lpr_path))
-        except Exception as exc:
-            self._error = str(exc)
-            logger.exception("加载 yolo_lprnet_assets runtime 失败: %s", exc)
+        with self._runtime_lock:
+            if self._runtime is not None and self._error is None:
+                return
+            if self._error is not None:
+                return
+            try:
+                from runtime_api import YoloLprRuntime, YoloLprConfig
+                yolo_path, lpr_path = self._resolve_weights()
+                self._yolo_path, self._lpr_path = yolo_path, lpr_path
+                self._runtime = YoloLprRuntime(YoloLprConfig(yolo_model=yolo_path, lpr_model=lpr_path))
+            except Exception as exc:
+                self._error = str(exc)
+                logger.exception("加载 yolo_lprnet_assets runtime 失败: %s", exc)
 
     def model_available(self) -> bool:
         self._load_runtime()
@@ -119,6 +127,13 @@ class LprVideoService:
         return filtered
 
     def recognize_frame(self, frame: np.ndarray, frame_index: int = 0) -> dict[str, Any]:
+        # A single runtime instance is shared by file, browser and network flows.
+        # Serialize model loading/inference because the underlying Torch runtime
+        # and GPU context are not safe to enter concurrently.
+        with self._runtime_lock:
+            return self._recognize_frame_locked(frame, frame_index)
+
+    def _recognize_frame_locked(self, frame: np.ndarray, frame_index: int = 0) -> dict[str, Any]:
         self._load_runtime()
         if not self.model_available():
             return {
@@ -240,74 +255,114 @@ class LprVideoService:
             b'Content-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n'
         )
 
-    def _make_rtsp_worker(self, rtsp_url: str, source_name: str, stop_event: threading.Event, state: dict[str, Any]):
+    def _make_rtsp_worker(
+        self,
+        source_name: str,
+        stop_event: threading.Event,
+        state: dict[str, Any],
+        subscription: NetworkStreamSubscription,
+    ):
         def worker():
-            cap2 = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-            cap2.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             frame_index = 0
-            logger.info("[LPR-RTSP] worker started input=%s source=%s", rtsp_url, source_name)
+            logger.info("[LPR-RTSP] shared worker started source=%s", source_name)
             try:
                 while not stop_event.is_set():
-                    ok, frame = cap2.read()
-                    if not ok:
-                        logger.info("[LPR-RTSP] frame read failed, retrying...")
-                        time.sleep(0.3)
+                    try:
+                        item = subscription.next_frame(timeout=1.0)
+                    except NetworkStreamError as exc:
+                        if not stop_event.is_set():
+                            with self._stream_lock:
+                                state["error"] = str(exc)
+                            logger.warning(
+                                "[LPR-RTSP] shared stream ended source=%s error=%s",
+                                source_name,
+                                exc,
+                            )
+                        break
+                    if item is None:
                         continue
+                    if stop_event.is_set():
+                        break
+                    frame = item.frame
                     if frame_index % 20 == 0:
                         logger.info("[LPR-RTSP] frame=%s shape=%s time=%s", frame_index, getattr(frame, 'shape', None), datetime.now().isoformat(timespec='seconds'))
                     result = self.recognize_frame(frame, frame_index)
-                    frame_index += 1
-                    state["latest"] = result
-                    state["frame_index"] = frame_index
-                    state["last_update"] = datetime.now().isoformat(timespec='seconds')
-                    state["latest_frame"] = frame
-                    fused_map = state.setdefault("fused_map", {})
-                    for p in result.get("plates", []):
-                        plate_number = (p.get("plate_number") or "").strip()
-                        confidence = float(p.get("confidence", 0.0))
-                        if not plate_number:
-                            continue
-                        key = (plate_number, p.get("plate_color", "蓝牌"))
-                        agg = fused_map.setdefault(key, {
-                            "plate_number": plate_number,
-                            "plate_color": p.get("plate_color", "蓝牌"),
-                            "confidence_sum": 0.0,
-                            "hit_count": 0,
-                            "max_confidence": 0.0,
-                            "frames": [],
-                            "source": "yolo_lprnet",
-                        })
-                        agg["confidence_sum"] += confidence
-                        agg["hit_count"] += 1
-                        agg["max_confidence"] = max(agg["max_confidence"], confidence)
-                        agg["frames"].append(frame_index)
+                    with self._stream_lock:
+                        if stop_event.is_set():
+                            break
+                        frame_index += 1
+                        state["latest"] = result
+                        state["frame_index"] = frame_index
+                        state["last_update"] = datetime.now().isoformat(timespec='seconds')
+                        state["latest_frame"] = frame
+                        fused_map = state.setdefault("fused_map", {})
+                        for p in result.get("plates", []):
+                            plate_number = (p.get("plate_number") or "").strip()
+                            confidence = float(p.get("confidence", 0.0))
+                            if not plate_number:
+                                continue
+                            key = (plate_number, p.get("plate_color", "蓝牌"))
+                            agg = fused_map.setdefault(key, {
+                                "plate_number": plate_number,
+                                "plate_color": p.get("plate_color", "蓝牌"),
+                                "confidence_sum": 0.0,
+                                "hit_count": 0,
+                                "max_confidence": 0.0,
+                                "frames": [],
+                                "source": "yolo_lprnet",
+                            })
+                            agg["confidence_sum"] += confidence
+                            agg["hit_count"] += 1
+                            agg["max_confidence"] = max(agg["max_confidence"], confidence)
+                            agg["frames"].append(frame_index)
             finally:
-                cap2.release()
+                subscription.close()
                 with self._stream_lock:
                     state["running"] = False
         return worker
 
-    def start_rtsp_stream(self, rtsp_url: str, source_name: str = "live1", label: str = "") -> dict[str, Any]:
+    def start_rtsp_stream(
+        self,
+        rtsp_url: str,
+        source_name: str = "live1",
+        label: str = "",
+        user_id: int | None = None,
+    ) -> dict[str, Any]:
         self._load_runtime()
         if not self.model_available():
             raise RuntimeError(self._error or "YOLO+LPRNet 模型未加载")
 
+        stream_key = (user_id, rtsp_url)
+        preview_key = (user_id, source_name)
         with self._stream_lock:
-            job = self._stream_jobs.get(rtsp_url)
+            job = self._stream_jobs.get(stream_key)
             if job and job.get("running"):
                 return {"success": True, **job["meta"], "message": "RTSP 识别任务已在运行"}
 
-            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            if not cap.isOpened():
-                raise RuntimeError(f"无法打开 RTSP 流: {rtsp_url}")
+            subscription: NetworkStreamSubscription | None = None
+            try:
+                subscription = network_stream_hub.subscribe(rtsp_url)
+                stream_info = subscription.wait_until_ready(timeout=8.5)
+            except (NetworkStreamError, ValueError) as exc:
+                if subscription is not None:
+                    subscription.close()
+                raise RuntimeError(f"无法打开网络视频流: {exc}") from exc
+            except Exception:
+                if subscription is not None:
+                    subscription.close()
+                raise
 
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
-            fps = int(cap.get(cv2.CAP_PROP_FPS) or 25)
-            cap.release()
+            width = stream_info.width
+            height = stream_info.height
+            fps = int(stream_info.fps or 25)
 
-            logger.info("[LPR-RTSP] launch direct input=%s size=%sx%s fps=%s", rtsp_url, width, height, fps)
+            logger.info(
+                "[LPR-RTSP] launch shared source=%s size=%sx%s fps=%s",
+                source_name,
+                width,
+                height,
+                fps,
+            )
             meta = {
                 "success": True,
                 "source": "yolo_lprnet",
@@ -326,46 +381,73 @@ class LprVideoService:
             }
 
             stop_event = threading.Event()
-            state = {"running": True, "proc": None, "thread": None, "stop_event": stop_event, "meta": meta, "latest": None, "rtsp_url": rtsp_url, "source_name": source_name, "latest_frame": None, "frame_index": 0, "last_update": None, "fused_map": {}}
-            worker = self._make_rtsp_worker(rtsp_url, source_name, stop_event, state)
+            state = {"running": True, "proc": None, "thread": None, "stop_event": stop_event, "meta": meta, "latest": None, "rtsp_url": rtsp_url, "source_name": source_name, "user_id": user_id, "latest_frame": None, "frame_index": 0, "last_update": None, "fused_map": {}, "subscription": subscription}
+            worker = self._make_rtsp_worker(source_name, stop_event, state, subscription)
             thread = threading.Thread(target=worker, daemon=True)
             state["thread"] = thread
-            self._stream_jobs[rtsp_url] = state
-            self._preview_jobs[source_name] = state
-            thread.start()
+            self._stream_jobs[stream_key] = state
+            self._preview_jobs[preview_key] = state
+            try:
+                thread.start()
+            except Exception:
+                state["running"] = False
+                subscription.close()
+                state["subscription"] = None
+                if self._stream_jobs.get(stream_key) is state:
+                    self._stream_jobs.pop(stream_key, None)
+                if self._preview_jobs.get(preview_key) is state:
+                    self._preview_jobs.pop(preview_key, None)
+                raise
             return {**meta, "preview_url": f"/api/lpr/preview/{source_name}.mjpg"}
 
-    def stop_rtsp_stream(self, rtsp_url: str = "", source_name: str = "") -> dict[str, Any]:
+    def stop_rtsp_stream(
+        self,
+        rtsp_url: str = "",
+        source_name: str = "",
+        user_id: int | None = None,
+    ) -> dict[str, Any]:
         stopped_any = False
         history: dict[str, Any] | None = None
+        threads: list[threading.Thread] = []
         with self._stream_lock:
-            if rtsp_url and rtsp_url in self._stream_jobs:
-                job = self._stream_jobs.get(rtsp_url)
-                if job:
-                    job["stop_event"].set()
-                    history = self._build_history_record(job, source_type="rtsp")
-                    try:
-                        if job.get("proc") and job["proc"].poll() is None:
-                            job["proc"].terminate()
-                    except Exception:
-                        pass
-                    job["running"] = False
-                    stopped_any = True
-            if source_name and source_name in self._preview_jobs:
-                job = self._preview_jobs.get(source_name)
-                if job:
-                    job["stop_event"].set()
-                    history = self._build_history_record(job, source_type="rtsp")
-                    try:
-                        if job.get("proc") and job["proc"].poll() is None:
-                            job["proc"].terminate()
-                    except Exception:
-                        pass
-                    job["running"] = False
-                    stopped_any = True
+            jobs: list[dict[str, Any]] = []
+            stream_key = (user_id, rtsp_url)
+            preview_key = (user_id, source_name)
+            if rtsp_url and stream_key in self._stream_jobs:
+                jobs.append(self._stream_jobs[stream_key])
+            if source_name and preview_key in self._preview_jobs:
+                source_job = self._preview_jobs[preview_key]
+                if all(source_job is not job for job in jobs):
+                    jobs.append(source_job)
+
+            for job in jobs:
+                job["stop_event"].set()
+                history = self._build_history_record(job, source_type="rtsp")
+                try:
+                    if job.get("proc") and job["proc"].poll() is None:
+                        job["proc"].terminate()
+                except Exception:
+                    pass
+                subscription = job.get("subscription")
+                if subscription is not None:
+                    subscription.close()
+                    job["subscription"] = None
+                job["running"] = False
+                thread = job.get("thread")
+                if thread is not None:
+                    threads.append(thread)
+                stopped_any = True
+        for thread in threads:
+            if thread is not threading.current_thread():
+                thread.join(timeout=2.0)
         return {"stopped": stopped_any, "message": "任务已停止" if stopped_any else "未找到对应任务", "history": history}
 
-    def start_video_file_stream(self, video_path: Path, source_name: str = "video30") -> dict[str, Any]:
+    def start_video_file_stream(
+        self,
+        video_path: Path,
+        source_name: str = "video30",
+        user_id: int | None = None,
+    ) -> dict[str, Any]:
         self._load_runtime()
         if not self.model_available():
             raise RuntimeError(self._error or "YOLO+LPRNet 模型未加载")
@@ -373,12 +455,26 @@ class LprVideoService:
         if not video_path.exists():
             raise FileNotFoundError(f"视频文件不存在: {video_path}")
 
+        preview_key = (user_id, source_name)
+        with self._stream_lock:
+            existing = self._preview_jobs.get(preview_key)
+            if existing and existing.get("running"):
+                return {
+                    "success": True,
+                    **existing.get("meta", {}),
+                    "message": "视频推流任务已在运行",
+                }
+
         cap = cv2.VideoCapture(str(video_path))
         fps = int(cap.get(cv2.CAP_PROP_FPS) or 25)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
         cap.release()
-        dst_url = f"rtsp://127.0.0.1:8554/{source_name}"
+        scope = "guest" if user_id is None else f"user-{user_id}"
+        internal_name = "lpr-" + hashlib.sha256(
+            f"{scope}:{source_name}".encode("utf-8")
+        ).hexdigest()[:16]
+        dst_url = f"rtsp://127.0.0.1:8554/{internal_name}"
         command = self._build_ffmpeg_file_command(video_path, dst_url, fps=fps)
         logger.info("[LPR-FILE] launch input=%s dst=%s size=%sx%s fps=%s cmd=%s", video_path, dst_url, width, height, fps, command)
         proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=False)
@@ -428,26 +524,31 @@ class LprVideoService:
                     preview_state["running"] = False
 
         thread = threading.Thread(target=worker, daemon=True)
-        preview_state.update({"proc": proc, "thread": thread, "stop_event": stop_event, "input_path": str(video_path), "dst_url": dst_url, "source_name": source_name, "hls_url": f"http://127.0.0.1:8888/{source_name}/index.m3u8"})
-        self._preview_jobs[source_name] = preview_state
-        thread.start()
-        return {
-            "success": True,
+        meta = {
             "source": "video_file",
             "source_name": source_name,
-            "message": f"视频推流已启动：{video_path.name}",
             "input_path": str(video_path),
             "dst_url": dst_url,
             "width": width,
             "height": height,
             "fps": fps,
             "proc_pid": proc.pid,
-            "hls_url": f"http://127.0.0.1:8888/{source_name}/index.m3u8",
+            "hls_url": f"http://127.0.0.1:8888/{internal_name}/index.m3u8",
             "preview_url": f"/api/lpr/preview/{source_name}.mjpg",
         }
+        preview_state.update({"proc": proc, "thread": thread, "stop_event": stop_event, "input_path": str(video_path), "dst_url": dst_url, "source_name": source_name, "user_id": user_id, "hls_url": meta["hls_url"], "meta": meta})
+        with self._stream_lock:
+            self._preview_jobs[preview_key] = preview_state
+        thread.start()
+        return {
+            "success": True,
+            **meta,
+            "message": f"视频推流已启动：{video_path.name}",
+        }
 
-    def preview_frame_generator(self, source_name: str):
-        job = self._preview_jobs.get(source_name)
+    def preview_frame_generator(self, source_name: str, user_id: int | None = None):
+        with self._stream_lock:
+            job = self._preview_jobs.get((user_id, source_name))
         if not job:
             raise FileNotFoundError(f"预览任务不存在: {source_name}")
         boundary = b'--frame\r\nContent-Type: image/jpeg\r\n\r\n'
@@ -464,8 +565,13 @@ class LprVideoService:
                     yield boundary + buf.tobytes() + b'\r\n'
             time.sleep(0.12)
 
-    def stop_preview_stream(self, source_name: str) -> dict[str, Any]:
-        job = self._preview_jobs.get(source_name)
+    def stop_preview_stream(
+        self,
+        source_name: str,
+        user_id: int | None = None,
+    ) -> dict[str, Any]:
+        with self._stream_lock:
+            job = self._preview_jobs.get((user_id, source_name))
         if not job:
             return {"stopped": False, "message": "未找到对应预览任务"}
         job["stop_event"].set()
@@ -474,26 +580,31 @@ class LprVideoService:
                 job["proc"].terminate()
         except Exception:
             pass
+        subscription = job.get("subscription")
+        if subscription is not None:
+            subscription.close()
+            job["subscription"] = None
         job["running"] = False
         return {"stopped": True, "message": "预览任务已停止"}
 
-    def preview_status(self, source_name: str) -> dict[str, Any]:
-        job = self._preview_jobs.get(source_name)
-        if not job:
-            return {"running": False, "found": False, "source_name": source_name}
-        latest = job.get("latest") or {}
-        return {
-            "found": True,
-            "running": bool(job.get("running")),
-            "source_name": source_name,
-            "frame_index": job.get("frame_index"),
-            "last_update": job.get("last_update"),
-            "dst_url": job.get("dst_url"),
-            "hls_url": job.get("hls_url"),
-            "plate_count": latest.get("plate_count", 0),
-            "plates": latest.get("plates", []),
-            "history": self._build_history_record(job, source_type="video", dry_run=True),
-        }
+    def preview_status(self, source_name: str, user_id: int | None = None) -> dict[str, Any]:
+        with self._stream_lock:
+            job = self._preview_jobs.get((user_id, source_name))
+            if not job:
+                return {"running": False, "found": False, "source_name": source_name}
+            latest = job.get("latest") or {}
+            return {
+                "found": True,
+                "running": bool(job.get("running")),
+                "source_name": source_name,
+                "frame_index": job.get("frame_index"),
+                "last_update": job.get("last_update"),
+                "dst_url": job.get("dst_url"),
+                "hls_url": job.get("hls_url"),
+                "plate_count": latest.get("plate_count", 0),
+                "plates": latest.get("plates", []),
+                "history": self._build_history_record(job, source_type="video", dry_run=True),
+            }
 
     def _build_history_record(self, job: dict[str, Any], source_type: str = "video", dry_run: bool = False) -> dict[str, Any]:
         fused_map = job.get("fused_map") or {}

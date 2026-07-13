@@ -2148,6 +2148,183 @@
 }
 .log-msg-cell .agent-log-line { margin: 0; }
 
+.recognition-mirror-panel { margin-bottom: var(--space-4); }
+.recognition-mirror-header {
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+.recognition-mirror-header h3 { margin-bottom: 4px; }
+.recognition-mirror-header .hint { margin: 0; max-width: 920px; }
+.recognition-mirror-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+.recognition-mirror-card {
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: rgba(255,255,255,.62);
+}
+.mirror-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.mirror-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border-light);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.mirror-status[data-state="starting"],
+.mirror-status[data-state="connecting"] {
+  color: var(--severity-warning);
+  border-color: var(--severity-warning);
+  background: var(--severity-warning-bg);
+}
+.mirror-status[data-state="running"],
+.mirror-status[data-state="connected"] {
+  color: var(--color-success);
+  border-color: var(--color-success);
+  background: var(--color-success-dim);
+}
+.mirror-status[data-state="error"] {
+  color: var(--severity-critical);
+  border-color: var(--severity-critical);
+  background: var(--severity-critical-bg);
+}
+.mirror-source {
+  min-height: 20px;
+  margin: 7px 0 9px;
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mirror-preview {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background: #1c1c1b;
+  color: rgba(255,255,255,.62);
+}
+.mirror-preview img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #111;
+}
+.mirror-preview img[hidden] { display: none; }
+.mirror-placeholder { position: relative; z-index: 1; padding: 12px; text-align: center; font-size: var(--text-xs); }
+.mirror-result {
+  min-height: 48px;
+  margin-top: 9px;
+  padding: 9px 10px;
+  border-radius: 7px;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.mirror-result strong { color: var(--color-text-primary); }
+.mirror-result small { color: var(--color-text-muted); }
+.mirror-vehicle-state {
+  margin-top: 10px;
+  padding: 11px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: rgba(255,255,255,.48);
+}
+.mirror-vehicle-head,
+.mirror-metric-label,
+.mirror-phone-row,
+.mirror-selection-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mirror-vehicle-head { margin-bottom: 10px; }
+.mirror-awake,
+.mirror-phone {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+.mirror-awake.awake,
+.mirror-phone.in-call { background: var(--color-success-dim); color: var(--color-success); }
+.mirror-vehicle-metrics { display: grid; gap: 9px; }
+.mirror-metric-label,
+.mirror-phone-row { color: var(--color-text-secondary); font-size: var(--text-xs); }
+.mirror-metric-label strong { color: var(--color-text-primary); }
+.mirror-meter {
+  height: 6px;
+  margin-top: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--color-border-light);
+}
+.mirror-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-accent-orange);
+  transition: width .2s ease;
+}
+.mirror-meter.temperature span { background: var(--color-info); }
+.mirror-selection-row {
+  margin-top: 11px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+.mirror-selection-row strong { color: var(--color-accent-orange); }
+.mirror-control-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+.mirror-control-chip {
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--color-border-light);
+  border-radius: 7px;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  text-align: center;
+  font-size: var(--text-xs);
+}
+.mirror-control-chip.active,
+.mirror-control-chip[aria-current="true"] {
+  border-color: var(--color-accent-orange);
+  background: var(--color-accent-dim);
+  color: var(--color-accent-orange);
+  font-weight: 600;
+}
+
 .scenario-fusion-panel { margin-bottom: var(--space-4); }
 .scenario-snapshot-strip {
   display: grid;
@@ -2204,10 +2381,24 @@
 .scenario-badge.warning { background: var(--severity-warning-bg); color: var(--severity-warning); }
 .scenario-badge.critical { background: var(--severity-critical-bg); color: var(--severity-critical); }
 @media (max-width: 900px) {
+  .recognition-mirror-grid { grid-template-columns: 1fr; }
+  .recognition-mirror-header { flex-direction: column; }
   .scenario-snapshot-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 /* ── Vision modules (LPR / Police / Owner) ── */
 .section-desc { color: var(--text-muted, var(--color-text-muted)); font-size: .9rem; margin: -.5rem 0 1.25rem; }
 .lpr-layout { display: grid; grid-template-columns: minmax(360px, .95fr) minmax(0, 1.05fr); gap: 1.25rem; align-items: start; }
+#view-lpr .lpr-input-panel,
+#view-lpr .source-preview-wrap { min-width: 0; }
+#lpr-video-output:not([hidden]) {
+  display: block;
+  width: 100%;
+  max-width: 640px;
+  max-height: 360px;
+  margin: 1rem auto 0;
+  object-fit: contain;
+  background: #111;
+  border-radius: var(--radius-md);
+}
 @media (max-width: 900px) { .lpr-layout { grid-template-columns: 1fr; } }

@@ -4,8 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>车载视觉感知与人机交互系统</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=20260713-merge1">
-  <link rel="stylesheet" href="/static/css/monitoring-workbench.css?v=20260713-merge1">
+  <link rel="stylesheet" href="/static/css/style.css?v=20260713-ownerfix1">
+  <link rel="stylesheet" href="/static/css/monitoring-workbench.css?v=20260713-ownerfix1">
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 </head>
 <body>
@@ -66,7 +66,6 @@
         <a href="#" class="nav-item" data-view="owner">✋ 车主控车</a>
         <a href="#" class="nav-item" data-view="alerts">🔔 告警中心</a>
         <a href="#" class="nav-item" data-view="logs">📋 系统日志</a>
-        <a href="/api/docs" target="_blank" class="nav-item">📖 API 文档</a>
         <div class="nav-footer">
           <span id="user-info">访客</span>
           <button class="btn small" onclick="App.logout()">退出</button>
@@ -107,6 +106,20 @@
                 <button class="btn" onclick="document.getElementById('lpr-file').click()">选择文件</button>
               </div>
               <div class="panel" style="margin-top:1rem">
+                <h4>USB / 内置 / DroidCam 摄像头实时识别</h4>
+                <div class="camera-device-row" id="lpr-camera-row">
+                  <select id="lpr-camera-device" aria-label="车牌识别摄像头">
+                    <option value="">默认摄像头</option>
+                  </select>
+                  <button class="btn" type="button" onclick="App.refreshCameraDevices('lpr')">刷新摄像头</button>
+                  <span id="lpr-camera-status" class="camera-status">尚未检测摄像头</span>
+                </div>
+                <div class="row" style="align-items:center; gap:.75rem; flex-wrap:wrap">
+                  <button class="btn primary" type="button" onclick="App.startStream('lpr')">启动摄像头识别</button>
+                  <button class="btn" type="button" onclick="App.stopStream('lpr')">停止摄像头识别</button>
+                </div>
+              </div>
+              <div class="panel" style="margin-top:1rem">
                 <h4>沙盘 RTSP 实时识别</h4>
                 <div class="row" style="align-items:center; gap:.75rem; flex-wrap:wrap">
                   <input type="text" id="lpr-rtsp-url" placeholder="rtsp://10.126.59.120:8554/live/live1" value="rtsp://10.126.59.120:8554/live/live1" style="flex:1; min-width:260px">
@@ -139,6 +152,7 @@
                   <div id="lpr-rtsp-debug" class="section-desc model-warn" style="margin-bottom:.5rem">预览未加载</div>
                   <img id="lpr-rtsp-video" class="rtsp-preview-img" alt="RTSP 预览">
                 </div>
+                <video id="lpr-video" class="source-video" autoplay playsinline muted hidden></video>
                 <video id="lpr-video-output" class="source-video" controls playsinline muted hidden></video>
                 <canvas id="lpr-canvas" hidden></canvas>
               </div>
@@ -211,7 +225,7 @@
               </div>
               <div class="lpr-actions">
                 <button class="btn primary" onclick="App.startStream('police')">📹 摄像头实时识别</button>
-                <button class="btn" onclick="App.stopStream()">停止视频/摄像头</button>
+                <button class="btn" onclick="App.stopStream('police')">停止视频/摄像头</button>
               </div>
               <div class="stream-url-row">
                 <select id="police-pose-backend">
@@ -274,7 +288,11 @@
               </div>
               <button class="btn" onclick="document.getElementById('owner-file').click()">上传图片/视频</button>
               <button class="btn primary" onclick="App.startStream('owner')">📹 实时手势控制</button>
-              <button class="btn" onclick="App.stopStream()">停止</button>
+              <button class="btn" onclick="App.stopStream('owner')">停止</button>
+              <div class="stream-url-row owner-stream-url-row">
+                <input type="text" id="owner-stream-url" placeholder="rtsp://... 或 http://手机IP:4747/video">
+                <button class="btn" onclick="App.startUrlStream('owner')">连接网络流</button>
+              </div>
               <video id="owner-video" autoplay playsinline muted hidden></video>
               <canvas id="owner-canvas" hidden></canvas>
               <div id="owner-gestures" class="gesture-ref"></div>
@@ -286,19 +304,19 @@
                 <h3>🚗 模拟车辆控制面板</h3>
                 <div class="vehicle-control">
                   <label>系统状态: <span id="v-awake">休眠</span></label>
-                  <label>当前选择: <span id="v-page">volume_up</span></label>
+                  <label class="current-control-label">当前选择: <span id="v-page" aria-live="polite">音量 +</span></label>
                   <div class="function-selector" id="owner-function-selector">
-                    <div class="function-card" data-control="volume_up"><strong>音量 +</strong><small>握拳确认增加音量</small></div>
-                    <div class="function-card" data-control="volume_down"><strong>音量 -</strong><small>握拳确认降低音量</small></div>
-                    <div class="function-card" data-control="temp_up"><strong>温度 +</strong><small>握拳确认升高温度</small></div>
-                    <div class="function-card" data-control="temp_down"><strong>温度 -</strong><small>握拳确认降低温度</small></div>
+                    <div class="function-card active" data-control="volume_up" aria-current="true"><strong>音量 +</strong><small>握拳或画圈增加音量</small></div>
+                    <div class="function-card" data-control="volume_down" aria-current="false"><strong>音量 -</strong><small>握拳或画圈降低音量</small></div>
+                    <div class="function-card" data-control="temp_up" aria-current="false"><strong>温度 +</strong><small>握拳或画圈升高温度</small></div>
+                    <div class="function-card" data-control="temp_down" aria-current="false"><strong>温度 -</strong><small>握拳或画圈降低温度</small></div>
                   </div>
                   <label>音量: <input type="range" id="v-volume" min="0" max="100" value="50" onchange="App.updateVehicle()"> <span id="v-volume-val">50</span></label>
                   <label>空调温度: <input type="range" id="v-temp" min="16" max="32" value="24" onchange="App.updateVehicle()"> <span id="v-temp-val">24</span>°C</label>
                   <div class="phone-btns">
-                    <button class="btn" id="v-answer" onclick="App.setPhone('in_call')">📞 接听</button>
-                    <button class="btn" id="v-hangup" onclick="App.setPhone('idle')">📵 挂断</button>
-                    <span id="v-phone">空闲</span>
+                    <button class="btn" id="v-answer" aria-pressed="false" onclick="App.setPhone('in_call')">📞 接听</button>
+                    <button class="btn" id="v-hangup" aria-pressed="true" onclick="App.setPhone('idle')">📵 挂断</button>
+                    <span id="v-phone" class="phone-status idle" role="status" aria-live="polite">空闲</span>
                   </div>
                   <div class="gesture-hints">手掌张开 → 唤醒系统；向左指/左滑 → 上一个功能；向右指/右滑 → 下一个功能；握拳 → 确认当前功能；单指画圈 → 调节当前选中项；点赞 → 接听电话；倒赞 → 挂断电话；挥手 → 返回待机。</div>
                 </div>
@@ -310,6 +328,94 @@
         <!-- 告警中心 -->
         <section id="view-alerts" class="view">
           <h2>告警中心</h2>
+
+          <!-- 识别模块镜像：仅展示三个原模块当前画面与结果，不重复采集或识别 -->
+          <div class="panel recognition-mirror-panel" id="recognition-mirror-panel">
+            <div class="panel-header-row recognition-mirror-header">
+              <div>
+                <h3>识别模块实时画面</h3>
+                <p class="hint">这里只镜像车牌识别、交警手势和车主控车模块当前正在识别的画面与结果，请在对应模块中选择来源并启动或停止识别。</p>
+              </div>
+            </div>
+
+            <div class="recognition-mirror-grid" id="recognition-mirror-grid">
+              <article class="recognition-mirror-card" data-module="lpr">
+                <div class="mirror-card-head">
+                  <strong>🚘 车牌识别</strong>
+                  <span class="mirror-status" id="mirror-lpr-status" data-state="idle">未运行</span>
+                </div>
+                <div class="mirror-source" id="mirror-lpr-source">来源：车牌识别模块</div>
+                <div class="mirror-preview">
+                  <img id="mirror-lpr-image" alt="车牌识别实时画面" hidden>
+                  <span class="mirror-placeholder" id="mirror-lpr-placeholder">请在车牌识别模块启动识别</span>
+                </div>
+                <div class="mirror-result" id="mirror-lpr-result">尚无识别结果</div>
+              </article>
+
+              <article class="recognition-mirror-card" data-module="police">
+                <div class="mirror-card-head">
+                  <strong>👮 交警手势</strong>
+                  <span class="mirror-status" id="mirror-police-status" data-state="idle">未运行</span>
+                </div>
+                <div class="mirror-source" id="mirror-police-source">来源：交警手势模块</div>
+                <div class="mirror-preview">
+                  <img id="mirror-police-image" alt="交警手势识别实时画面" hidden>
+                  <span class="mirror-placeholder" id="mirror-police-placeholder">请在交警手势模块启动识别</span>
+                </div>
+                <div class="mirror-result" id="mirror-police-result">尚无识别结果</div>
+              </article>
+
+              <article class="recognition-mirror-card" data-module="owner">
+                <div class="mirror-card-head">
+                  <strong>🤚 车主控车</strong>
+                  <span class="mirror-status" id="mirror-owner-status" data-state="idle">未运行</span>
+                </div>
+                <div class="mirror-source" id="mirror-owner-source">来源：车主控车模块</div>
+                <div class="mirror-preview">
+                  <img id="mirror-owner-image" alt="车主手势识别实时画面" hidden>
+                  <span class="mirror-placeholder" id="mirror-owner-placeholder">请在车主控车模块启动识别</span>
+                </div>
+                <div class="mirror-result" id="mirror-owner-result">尚无识别结果</div>
+
+                <div class="mirror-vehicle-state" aria-label="汽车状态">
+                  <div class="mirror-vehicle-head">
+                    <strong>汽车状态</strong>
+                    <span class="mirror-awake" id="mirror-owner-awake">休眠</span>
+                  </div>
+                  <div class="mirror-vehicle-metrics">
+                    <div class="mirror-metric">
+                      <div class="mirror-metric-label"><span>音量</span><strong id="mirror-owner-volume">50</strong></div>
+                      <div class="mirror-meter" aria-hidden="true"><span id="mirror-owner-volume-fill" style="width:50%"></span></div>
+                    </div>
+                    <div class="mirror-metric">
+                      <div class="mirror-metric-label"><span>空调温度</span><strong id="mirror-owner-temperature">24°C</strong></div>
+                      <div class="mirror-meter temperature" aria-hidden="true"><span id="mirror-owner-temperature-fill" style="width:50%"></span></div>
+                    </div>
+                    <div class="mirror-phone-row"><span>电话</span><strong class="mirror-phone idle" id="mirror-owner-phone">空闲</strong></div>
+                  </div>
+                  <div class="mirror-selection-row">当前选择：<strong id="mirror-owner-selection">等待状态</strong></div>
+                  <div class="mirror-control-grid" aria-label="四个可选调节模块">
+                    <span class="mirror-control-chip" data-control="volume_up" aria-current="false">音量 +</span>
+                    <span class="mirror-control-chip" data-control="volume_down" aria-current="false">音量 -</span>
+                    <span class="mirror-control-chip" data-control="temp_up" aria-current="false">温度 +</span>
+                    <span class="mirror-control-chip" data-control="temp_down" aria-current="false">温度 -</span>
+                  </div>
+                </div>
+              </article>
+            </div>
+          </div>
+
+          <!-- 多路感知融合面板 -->
+          <div class="panel scenario-fusion-panel" id="scenario-fusion-panel">
+            <div class="panel-header-row">
+              <h3>多路感知 · 场景冲突与融合建议</h3>
+              <button class="btn small" type="button" onclick="App.loadScenarioFusion()">刷新</button>
+            </div>
+            <div id="scenario-snapshot" class="scenario-snapshot-strip"></div>
+            <div id="scenario-driving-advice" class="scenario-driving-advice"></div>
+            <div id="scenario-conflicts" class="scenario-conflicts-list"></div>
+          </div>
+
           <div class="toolbar toolbar-wrap alert-toolbar">
             <div class="toolbar-row">
               <div class="toolbar-field alert-field-select">
@@ -515,7 +621,6 @@
                 </div>
               </div>
               <div class="toolbar-field log-field-keyword"><label>关键词</label><input id="log-search" placeholder="输入关键词" onkeydown="if(event.key==='Enter')App.loadLogs()" /></div>
-              <div class="toolbar-field log-field-user"><label>用户ID</label><input id="log-user" placeholder="可选" onkeydown="if(event.key==='Enter')App.loadLogs()" /></div>
               <div class="toolbar-field toolbar-field-actions log-field-export">
                 <label class="toolbar-label-spacer" aria-hidden="true">&nbsp;</label>
                 <div class="toolbar-btn-group">
@@ -674,7 +779,7 @@
         </div>
       </div>
     </div>
-  <script src="/static/js/app.js?v=20260713-merge1"></script>
-  <script src="/static/js/monitoring-workbench.js?v=20260712-monitor3"></script>
+  <script src="/static/js/app.js?v=20260713-user-scope1"></script>
+  <script src="/static/js/monitoring-workbench.js?v=20260713-user-scope1"></script>
 </body>
 </html>

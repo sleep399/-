@@ -1,7 +1,6 @@
 from datetime import datetime, timedelta
 from typing import Optional
 import bcrypt
-import hmac
 from jose import jwt, JWTError
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -24,9 +23,7 @@ def verify_password(plain: str, hashed: str) -> bool:
     try:
         return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
     except (ValueError, TypeError):
-        # Kept only to allow a locally seeded legacy demo account to log in
-        # once after upgrading; newly registered passwords are always bcrypt.
-        return hmac.compare_digest(plain, hashed)
+        return False
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -46,11 +43,22 @@ def get_current_user(
         payload = jwt.decode(token, settings.secret_key, algorithms=["HS256"])
         username = payload.get("sub")
         if not username:
-            return None
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="登录令牌无效",
+            )
     except JWTError:
-        return None
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="登录令牌无效或已过期",
+        )
     user = db.query(User).filter(User.username == username).first()
-    return user if user and user.is_active else None
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="账号不存在或已停用",
+        )
+    return user
 
 
 def require_user(user: Optional[User] = Depends(get_current_user)) -> User:

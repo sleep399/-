@@ -2,6 +2,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
@@ -9,6 +10,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 from app.database import Base, SessionLocal, engine
 from app.models.logs import SystemLog
 from app.services.alert_agent import alert_agent
+from app.services.scenario_fusion_service import scenario_fusion_service
 from app.utils.recognition_monitor import (
     record_lpr_recognition,
     record_police_recognition,
@@ -109,6 +111,54 @@ class RecognitionMonitorTest(unittest.IsolatedAsyncioTestCase):
         log = self.db.query(SystemLog).filter(SystemLog.category == "owner_gesture").first()
         self.assertEqual(log.level, "警告")
         self.assertIn("待确认", log.message)
+
+    async def test_source_ids_are_forwarded_to_scenario_ingestion(self):
+        with (
+            patch.object(
+                scenario_fusion_service, "ingest_lpr", new=AsyncMock(return_value=None)
+            ) as ingest_lpr,
+            patch.object(
+                scenario_fusion_service, "ingest_police", new=AsyncMock(return_value=None)
+            ) as ingest_police,
+            patch.object(
+                scenario_fusion_service, "ingest_owner", new=AsyncMock(return_value=None)
+            ) as ingest_owner,
+        ):
+            await record_lpr_recognition(
+                self.db,
+                success=True,
+                source="RTSP流",
+                source_id="rtsp://camera-a/live",
+                plate_count=1,
+                plates=["粤B12345"],
+            )
+            await record_police_recognition(
+                self.db,
+                source="DroidCam",
+                source_id="droidcam://phone-1",
+                gesture="stop",
+                gesture_cn="停止",
+                confidence=0.95,
+            )
+            await record_owner_recognition(
+                self.db,
+                source="USB摄像头",
+                source_id="usb://camera-0",
+                gesture="fist",
+                gesture_cn="握拳",
+                action="confirm",
+                confidence=0.92,
+            )
+
+        self.assertEqual(
+            ingest_lpr.await_args.kwargs["source_id"], "rtsp://camera-a/live"
+        )
+        self.assertEqual(
+            ingest_police.await_args.kwargs["source_id"], "droidcam://phone-1"
+        )
+        self.assertEqual(
+            ingest_owner.await_args.kwargs["source_id"], "usb://camera-0"
+        )
 
     def test_owner_vehicle_state_log(self):
         record_owner_vehicle_state(

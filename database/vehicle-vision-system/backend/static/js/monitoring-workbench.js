@@ -16,10 +16,7 @@
     info: '#5A89B8',
   },
   token: localStorage.getItem('token') || '',
-  streamModule: null,
-  streamInterval: null,
   wsAlerts: null,
-  wsStream: null,
   sseSource: null,
   assistantHistory: [],
   assistantThinking: false,
@@ -45,6 +42,18 @@
   focusedAlert: null,
   currentView: '',
   logSseSource: null,
+  recognitionMirrors: {
+    lpr: { status: 'idle', statusText: '未运行', source: '车牌识别模块', previewSrc: '', result: null, updatedAt: null },
+    police: { status: 'idle', statusText: '未运行', source: '交警手势模块', previewSrc: '', result: null, updatedAt: null },
+    owner: { status: 'idle', statusText: '未运行', source: '车主控车模块', previewSrc: '', result: null, vehicleState: null, updatedAt: null },
+  },
+  scenarioFusionRefresh: {
+    timer: null,
+    queuedAt: 0,
+    inFlight: false,
+    dirty: false,
+  },
+  ownerVehicleRefreshTimer: null,
   LOG_CATEGORY_LABELS: {
     lpr: '车牌识别',
     police_gesture: '交警手势',
@@ -247,9 +256,16 @@
 
 
   // ── WebSocket & SSE ──
+  monitorStreamUrl(path) {
+    const url = new URL(this.apiUrl(path));
+    if (this.token) url.searchParams.set('token', this.token);
+    return url.toString();
+  },
+
   connectAlertWs() {
     if (this.wsAlerts && this.wsAlerts.readyState === WebSocket.OPEN) return;
-    this.wsAlerts = new WebSocket(`${this.wsBase()}/ws/alerts`);
+    const tokenQuery = this.token ? `?token=${encodeURIComponent(this.token)}` : '';
+    this.wsAlerts = new WebSocket(`${this.wsBase()}/ws/alerts${tokenQuery}`);
     this.wsAlerts.onmessage = (e) => {
       const data = JSON.parse(e.data);
       if (data.type === 'alert') {
@@ -268,7 +284,7 @@
 
   connectSSE() {
     if (this.sseSource) return;
-    this.sseSource = new EventSource(this.apiUrl('/api/monitor/stream'));
+    this.sseSource = new EventSource(this.monitorStreamUrl('/api/monitor/stream'));
     this.sseSource.onopen = () => {
       document.getElementById('stat-sse-conn') && (document.getElementById('stat-sse-conn').textContent = '1');
     };
@@ -941,8 +957,8 @@
   },
 
   resetLogFilters(reload = true) {
-    const ids = ['log-category', 'log-level', 'log-search', 'log-user', 'log-start', 'log-end'];
-    const defaults = { 'log-category': '', 'log-level': '', 'log-search': '', 'log-user': '', 'log-start': '', 'log-end': '' };
+    const ids = ['log-category', 'log-level', 'log-search', 'log-start', 'log-end'];
+    const defaults = { 'log-category': '', 'log-level': '', 'log-search': '', 'log-start': '', 'log-end': '' };
     ids.forEach(id => {
       const el = document.getElementById(id);
       if (el) el.value = defaults[id] ?? '';
@@ -1144,7 +1160,6 @@
       cat: (document.getElementById('log-category') && document.getElementById('log-category').value) || '',
       level: (document.getElementById('log-level') && document.getElementById('log-level').value) || '',
       search: (document.getElementById('log-search') && document.getElementById('log-search').value) || '',
-      userId: (document.getElementById('log-user') && document.getElementById('log-user').value) || '',
       start: (document.getElementById('log-start') && document.getElementById('log-start').value) || '',
       end: (document.getElementById('log-end') && document.getElementById('log-end').value) || '',
     };
@@ -1154,7 +1169,6 @@
     if (!log) return false;
     if (filters.cat && log.category !== filters.cat) return false;
     if (filters.level && !this.logLevelMatchesFilter(log.level, filters.level)) return false;
-    if (filters.userId && String(log.user_id || '') !== String(filters.userId)) return false;
     if (filters.search) {
       const q = filters.search.toLowerCase();
       const msg = String(log.message || '').toLowerCase();
@@ -1280,7 +1294,7 @@
     if (this.logSseSource) return;
     const statusEl = document.getElementById('log-stream-status');
     const btn = document.getElementById('log-stream-btn');
-    this.logSseSource = new EventSource(this.apiUrl('/api/monitor/logs/stream'));
+    this.logSseSource = new EventSource(this.monitorStreamUrl('/api/monitor/logs/stream'));
     this.logSseSource.onopen = () => {
       if (statusEl) { statusEl.textContent = '监听中'; statusEl.className = 'conn-status connected'; }
       if (btn) btn.textContent = '停止监听';
@@ -1320,7 +1334,6 @@
       if (filters.cat) url += '&category=' + filters.cat;
       if (filters.level) url += '&level=' + filters.level;
       if (filters.search) url += '&search=' + encodeURIComponent(filters.search);
-      if (filters.userId) url += '&user_id=' + filters.userId;
       if (filters.start) url += '&start=' + new Date(filters.start).toISOString();
       if (filters.end) url += '&end=' + new Date(filters.end).toISOString();
 
@@ -2138,6 +2151,294 @@
     if (last) this.speakAssistant(last.content, { force: true });
   },
 
+  initRecognitionMirrors() {
+    if (!this.recognitionMirrors) this.recognitionMirrors = {};
+    const defaults = {
+      lpr: { status: 'idle', statusText: '未运行', source: '车牌识别模块', previewSrc: '', result: null, updatedAt: null },
+      police: { status: 'idle', statusText: '未运行', source: '交警手势模块', previewSrc: '', result: null, updatedAt: null },
+      owner: { status: 'idle', statusText: '未运行', source: '车主控车模块', previewSrc: '', result: null, vehicleState: null, updatedAt: null },
+    };
+    Object.entries(defaults).forEach(([module, fallback]) => {
+      this.recognitionMirrors[module] = { ...fallback, ...(this.recognitionMirrors[module] || {}) };
+      this.renderRecognitionMirror(module);
+    });
+    const ownerState = this.recognitionMirrors.owner?.vehicleState || this.ownerVehicleState;
+    if (ownerState) this.publishOwnerVehicleState(ownerState);
+    if (this.loadVehicleState) {
+      Promise.resolve(this.loadVehicleState()).catch(() => {});
+    }
+  },
+
+  setRecognitionMirrorStatus(module, status, statusText, source, options = {}) {
+    if (!['lpr', 'police', 'owner'].includes(module)) return;
+    if (!this.recognitionMirrors) this.initRecognitionMirrors();
+    const defaults = { lpr: '车牌识别模块', police: '交警手势模块', owner: '车主控车模块' };
+    const state = this.recognitionMirrors[module] || {
+      status: 'idle', statusText: '未运行', source: defaults[module], previewSrc: '', result: null, updatedAt: null,
+    };
+    state.status = status || state.status || 'idle';
+    state.statusText = statusText || ({
+      idle: '未运行', connecting: '正在连接', running: '实时识别中', complete: '识别已完成', error: '识别异常',
+    }[state.status] || state.statusText || '未运行');
+    if (source !== undefined && source !== null) state.source = String(source).trim() || defaults[module];
+    if (options.clearPreview) {
+      state.previewSrc = '';
+      state.previewFailed = false;
+      state.result = null;
+    } else if (Object.prototype.hasOwnProperty.call(options, 'previewUrl')) {
+      const rawPreview = String(options.previewUrl || '').trim();
+      const nextPreview = rawPreview && !/^(?:data:|blob:|https?:\/\/)/i.test(rawPreview) && this.apiUrl
+        ? this.apiUrl(rawPreview)
+        : rawPreview;
+      if (nextPreview !== state.previewSrc) state.previewFailed = false;
+      state.previewSrc = nextPreview;
+    }
+    state.updatedAt = new Date().toISOString();
+    this.recognitionMirrors[module] = state;
+    this.renderRecognitionMirror(module);
+  },
+
+  publishRecognitionResult(module, data = {}, options = {}) {
+    if (!['lpr', 'police', 'owner'].includes(module)) return;
+    if (!this.recognitionMirrors) this.initRecognitionMirrors();
+    const state = this.recognitionMirrors[module] || {};
+    this.setRecognitionMirrorStatus(
+      module,
+      options.status || state.status || 'running',
+      options.statusText,
+      options.source,
+      Object.prototype.hasOwnProperty.call(options, 'previewUrl') ? { previewUrl: options.previewUrl } : {},
+    );
+    const current = this.recognitionMirrors[module];
+    current.result = data || {};
+    const annotatedImage = data?.annotated_image;
+    if (annotatedImage) {
+      const rawImage = String(annotatedImage);
+      current.previewSrc = /^data:image\//i.test(rawImage) ? rawImage : 'data:image/jpeg;base64,' + rawImage;
+    }
+    current.updatedAt = new Date().toISOString();
+    const acceptVehicleState = options.acceptVehicleState !== false;
+    if (module === 'owner' && data?.vehicle_state && acceptVehicleState) current.vehicleState = { ...data.vehicle_state };
+    this.renderRecognitionMirror(module);
+    if (module === 'owner' && data?.vehicle_state && acceptVehicleState) this.publishOwnerVehicleState(data.vehicle_state);
+    this.scheduleScenarioFusionRefresh?.(550);
+  },
+
+  renderRecognitionMirror(module) {
+    const state = this.recognitionMirrors?.[module];
+    if (!state) return;
+    const statusEl = document.getElementById('mirror-' + module + '-status');
+    const sourceEl = document.getElementById('mirror-' + module + '-source');
+    const imageEl = document.getElementById('mirror-' + module + '-image');
+    const placeholderEl = document.getElementById('mirror-' + module + '-placeholder');
+    const resultEl = document.getElementById('mirror-' + module + '-result');
+    if (statusEl) {
+      statusEl.dataset.state = state.status || 'idle';
+      statusEl.textContent = state.statusText || '未运行';
+    }
+    if (sourceEl) sourceEl.textContent = '来源：' + (state.source || this.recognitionMirrorSource(module));
+    if (imageEl && state.previewSrc) {
+      let renderedSrc = state.previewSrc;
+      if (state.previewFailed && /^https?:\/\//i.test(renderedSrc)) {
+        const separator = renderedSrc.includes('?') ? '&' : '?';
+        renderedSrc += separator + '_mirror_retry=' + Date.now();
+        state.previewFailed = false;
+      }
+      if (imageEl.getAttribute('src') !== renderedSrc) imageEl.src = renderedSrc;
+      imageEl.hidden = false;
+      imageEl.onerror = () => {
+        state.previewFailed = true;
+        imageEl.hidden = true;
+        if (placeholderEl) {
+          placeholderEl.hidden = false;
+          placeholderEl.textContent = '识别画面暂不可用';
+        }
+      };
+      imageEl.onload = () => { state.previewFailed = false; };
+      if (placeholderEl) placeholderEl.hidden = true;
+    } else {
+      if (imageEl) {
+        imageEl.hidden = true;
+        imageEl.removeAttribute('src');
+      }
+      if (placeholderEl) {
+        const label = ({ lpr: '车牌识别', police: '交警手势', owner: '车主控车' })[module] || module;
+        placeholderEl.hidden = false;
+        placeholderEl.textContent = state.status === 'connecting'
+          ? '正在等待识别画面'
+          : (state.status === 'error' ? '识别画面不可用' : '请在' + label + '模块启动识别');
+      }
+    }
+    if (!resultEl) return;
+    const data = state.result;
+    if (!data) {
+      resultEl.textContent = state.status === 'error' ? (state.statusText || '识别异常') : '尚无识别结果';
+      return;
+    }
+    let title = '';
+    let detail = '';
+    if (module === 'lpr') {
+      const plates = Array.isArray(data.plates) ? data.plates : [];
+      const labels = plates.map(item => item?.plate_number || item?.plate || '').filter(Boolean);
+      title = labels.length ? labels.join('、') : '当前画面未识别到车牌';
+      detail = labels.length ? '检测到 ' + (data.plate_count ?? labels.length) + ' 个车牌' : '持续识别中';
+    } else if (module === 'police') {
+      title = data.gesture_cn || data.gesture || '当前无明确交警手势';
+      const confidence = Number(data.confidence);
+      detail = Number.isFinite(confidence) ? '置信度 ' + (confidence * 100).toFixed(0) + '%' : '持续识别中';
+    } else {
+      title = data.gesture_cn || data.gesture || '当前无明确车主手势';
+      const action = data.action ? (this.ownerActionLabel ? this.ownerActionLabel(data.action) : data.action) : '';
+      const confidence = Number(data.confidence);
+      detail = [
+        action ? '动作：' + action : '',
+        Number.isFinite(confidence) ? '置信度 ' + (confidence * 100).toFixed(0) + '%' : '',
+      ].filter(Boolean).join(' · ') || '持续识别中';
+    }
+    const updatedAt = state.updatedAt ? new Date(state.updatedAt).toLocaleTimeString() : '';
+    resultEl.innerHTML = '<strong>' + this.escHtml(title) + '</strong><br>'
+      + '<span>' + this.escHtml(detail) + '</span>'
+      + (updatedAt ? '<br><small>更新于 ' + this.escHtml(updatedAt) + '</small>' : '');
+  },
+
+  publishOwnerVehicleState(vehicleState) {
+    if (!vehicleState) return;
+    if (!this.recognitionMirrors) this.initRecognitionMirrors();
+    const owner = this.recognitionMirrors.owner || {};
+    owner.vehicleState = { ...vehicleState };
+    owner.updatedAt = new Date().toISOString();
+    this.recognitionMirrors.owner = owner;
+    this.renderOwnerVehicleMirror(owner.vehicleState);
+  },
+
+  renderOwnerVehicleMirror(vehicleState = null) {
+    const state = vehicleState || this.recognitionMirrors?.owner?.vehicleState || this.ownerVehicleState;
+    if (!state) return;
+    const awake = Boolean(state.is_awake);
+    const volumeValue = Number(state.volume);
+    const temperatureValue = Number(state.temperature);
+    const volume = Number.isFinite(volumeValue) ? Math.max(0, Math.min(100, volumeValue)) : 50;
+    const temperature = Number.isFinite(temperatureValue) ? Math.max(16, Math.min(32, temperatureValue)) : 24;
+    const phoneInCall = state.phone_status === 'in_call';
+    const names = {
+      volume_up: '音量 +', volume_down: '音量 -', temp_up: '温度 +', temp_down: '温度 -', standby: '待机主页',
+    };
+    const current = state.current_page || 'volume_up';
+    const controlItems = ['volume_up', 'volume_down', 'temp_up', 'temp_down'];
+    const selectedControl = controlItems.includes(current) ? current : 'volume_up';
+    const awakeEl = document.getElementById('mirror-owner-awake');
+    const volumeEl = document.getElementById('mirror-owner-volume');
+    const volumeFill = document.getElementById('mirror-owner-volume-fill');
+    const temperatureEl = document.getElementById('mirror-owner-temperature');
+    const temperatureFill = document.getElementById('mirror-owner-temperature-fill');
+    const phoneEl = document.getElementById('mirror-owner-phone');
+    const selectionEl = document.getElementById('mirror-owner-selection');
+    if (awakeEl) {
+      awakeEl.textContent = awake ? '已唤醒' : '休眠';
+      awakeEl.classList.toggle('awake', awake);
+    }
+    if (volumeEl) volumeEl.textContent = String(volume);
+    if (volumeFill) volumeFill.style.width = volume + '%';
+    if (temperatureEl) temperatureEl.textContent = temperature + '°C';
+    if (temperatureFill) temperatureFill.style.width = (((temperature - 16) / 16) * 100).toFixed(1) + '%';
+    if (phoneEl) {
+      phoneEl.textContent = phoneInCall ? '通话中' : '空闲';
+      phoneEl.classList.toggle('in-call', phoneInCall);
+      phoneEl.classList.toggle('idle', !phoneInCall);
+    }
+    if (selectionEl) selectionEl.textContent = names[selectedControl] || selectedControl;
+    document.querySelectorAll('.mirror-control-chip[data-control]').forEach(chip => {
+      const selected = chip.dataset.control === selectedControl;
+      chip.classList.toggle('active', selected);
+      chip.setAttribute('aria-current', selected ? 'true' : 'false');
+    });
+  },
+
+  recognitionMirrorSource(module, fallback = '') {
+    const defaults = { lpr: '车牌识别模块', police: '交警手势模块', owner: '车主控车模块' };
+    const source = String(this.recognitionMirrors?.[module]?.source || '').trim();
+    if (source && source !== defaults[module]) return source;
+    return fallback || source || defaults[module] || '';
+  },
+
+  scheduleScenarioFusionRefresh(delay = 550) {
+    const state = this.scenarioFusionRefresh || (this.scenarioFusionRefresh = {
+      timer: null,
+      queuedAt: 0,
+      inFlight: false,
+      dirty: false,
+    });
+    const now = Date.now();
+    if (!state.queuedAt) state.queuedAt = now;
+    if (state.timer) clearTimeout(state.timer);
+    const elapsed = now - state.queuedAt;
+    const wait = elapsed >= 800 ? 0 : Math.min(Math.max(300, delay), 800 - elapsed);
+    state.timer = setTimeout(() => {
+      state.timer = null;
+      state.queuedAt = 0;
+      this.runScenarioFusionRefresh();
+    }, wait);
+  },
+
+  async runScenarioFusionRefresh() {
+    const state = this.scenarioFusionRefresh || (this.scenarioFusionRefresh = {
+      timer: null,
+      queuedAt: 0,
+      inFlight: false,
+      dirty: false,
+    });
+    if (state.inFlight) {
+      state.dirty = true;
+      return;
+    }
+    if (this.currentView !== 'alerts' || !this.loadScenarioFusion) return;
+    state.inFlight = true;
+    state.dirty = false;
+    try {
+      await this.loadScenarioFusion();
+    } finally {
+      state.inFlight = false;
+      if (state.dirty) {
+        state.dirty = false;
+        this.scheduleScenarioFusionRefresh(300);
+      }
+    }
+  },
+
+  connectAlertScenarioLogStream() {
+    if (this.alertScenarioLogSse || !document.getElementById('view-alerts')) return;
+    const source = new EventSource(this.monitorStreamUrl('/api/monitor/logs/stream'));
+    this.alertScenarioLogSse = source;
+    source.onmessage = event => {
+      let data;
+      try { data = JSON.parse(event.data || '{}'); } catch (e) { return; }
+      const category = data.category || data.data?.category;
+      if (['lpr', 'police_gesture', 'owner_gesture'].includes(category)) {
+        this.scheduleScenarioFusionRefresh(550);
+      }
+      if (category === 'owner_gesture' && this.loadVehicleState) {
+        if (this.ownerVehicleRefreshTimer) clearTimeout(this.ownerVehicleRefreshTimer);
+        this.ownerVehicleRefreshTimer = setTimeout(() => {
+          this.ownerVehicleRefreshTimer = null;
+          if (this.currentView === 'alerts') this.loadVehicleState();
+        }, 350);
+      }
+    };
+    // EventSource 会自动重连；仅在离开告警页时主动关闭。
+    source.onerror = () => {};
+  },
+
+  disconnectAlertScenarioLogStream() {
+    if (this.alertScenarioLogSse) {
+      this.alertScenarioLogSse.close();
+      this.alertScenarioLogSse = null;
+    }
+    if (this.ownerVehicleRefreshTimer) {
+      clearTimeout(this.ownerVehicleRefreshTimer);
+      this.ownerVehicleRefreshTimer = null;
+    }
+  },
+
   isIdleDrivingAdvice(advice) {
     if (!advice || !advice.advice) return true;
     const text = String(advice.advice).trim();
@@ -2212,6 +2513,9 @@
     const ownerSub = owner.action
       ? (owner.gesture_cn || owner.gesture || '—')
       : (owner.gesture_cn || owner.gesture ? '未触发控车动作' : '—');
+    const lprSource = this.recognitionMirrorSource('lpr', lpr.source);
+    const policeSource = this.recognitionMirrorSource('police', police.source);
+    const ownerSource = this.recognitionMirrorSource('owner', owner.source);
     const suppressed = snapshot.owner_suppressed
       ? `<span class="scenario-badge warning">车主动作已抑制</span>`
       : '';
@@ -2219,17 +2523,17 @@
       <div class="scenario-signal-card">
         <span class="scenario-signal-label">车牌</span>
         <strong>${lpr.plate_count || 0} 个</strong>
-        <small>${this.escHtml(plates)}</small>
+        <small>${this.escHtml(plates)}${lprSource ? ` · ${this.escHtml(lprSource)}` : ''}</small>
       </div>
       <div class="scenario-signal-card">
         <span class="scenario-signal-label">交警</span>
         <strong>${this.escHtml(police.gesture_cn || police.gesture || '—')}</strong>
-        <small>${police.confidence != null ? (police.confidence * 100).toFixed(0) + '%' : '—'}</small>
+        <small>${police.confidence != null ? (police.confidence * 100).toFixed(0) + '%' : '—'}${policeSource ? ` · ${this.escHtml(policeSource)}` : ''}</small>
       </div>
       <div class="scenario-signal-card">
         <span class="scenario-signal-label">车主</span>
         <strong>${this.escHtml(ownerMain)}</strong>
-        <small>${this.escHtml(ownerSub)}</small>
+        <small>${this.escHtml(ownerSub)}${ownerSource ? ` · ${this.escHtml(ownerSource)}` : ''}</small>
       </div>
       <div class="scenario-signal-card scenario-meta-card">
         <span class="scenario-signal-label">窗口</span>
@@ -2243,7 +2547,7 @@
     const el = document.getElementById('scenario-driving-advice');
     if (!el || !advice) return;
     const modeLabel = advice.mode === 'llm' ? 'LLM 融合推理' : '规则模板';
-    const priority = advice.priority || 'normal';
+    const priority = ['high', 'medium', 'normal'].includes(advice.priority) ? advice.priority : 'normal';
     const signals = advice.signals_summary || '—';
     el.innerHTML = `
       <div class="scenario-advice-card ${priority}">
@@ -2277,12 +2581,15 @@
     }
     el.innerHTML = items.map(c => {
       const status = c.status === 'open' ? '未处理' : '已处理';
-      const sev = c.severity || 'warning';
+      const sev = ['critical', 'warning', 'info'].includes(c.severity) ? c.severity : 'warning';
+      const conflictId = Number(c.id);
+      const alertId = Number(c.alert_id);
       const resolveBtn = c.status === 'open'
-        ? `<button class="btn small" onclick="App.resolveScenarioConflict(${c.id})">确认处置</button>`
+        && Number.isSafeInteger(conflictId)
+        ? `<button class="btn small" onclick="App.resolveScenarioConflict(${conflictId})">确认处置</button>`
         : '';
-      const alertLink = c.alert_id
-        ? `<button class="btn small" onclick="App.viewReplay(${c.alert_id})">查看告警</button>`
+      const alertLink = Number.isSafeInteger(alertId) && alertId > 0
+        ? `<button class="btn small" onclick="App.viewReplay(${alertId})">查看告警</button>`
         : '';
       return `<div class="scenario-conflict-card ${sev}">
         <div class="scenario-conflict-head">

@@ -1,11 +1,7 @@
 const App = {
   token: localStorage.getItem('token') || '',
-  streamModule: null,
-  streamInterval: null,
-  streamBusy: false,
-  streamTimeout: null,
+  currentUser: null,
   wsAlerts: null,
-  wsStream: null,
   alertSse: null,
   logSse: null,
   lprVideoWs: null,
@@ -20,10 +16,21 @@ const App = {
   ownerLastGestureHtml: '',
   ownerStandbyDismissed: false,
   ownerStandbyLockedUntil: 0,
+  ownerVehicleState: null,
   focusedAlertId: null,
   focusedAlertTitle: '',
+  // 三个原模块各自维护识别通道；摄像头采集按物理来源共享。
+  moduleStreams: {
+    lpr: { ws: null, interval: null, timeout: null, busy: false, mode: null, source: '', generation: 0, failed: false },
+    police: { ws: null, interval: null, timeout: null, busy: false, mode: null, source: '', generation: 0, failed: false },
+    owner: { ws: null, interval: null, timeout: null, busy: false, mode: null, source: '', generation: 0, failed: false },
+  },
+  cameraSources: new Map(),
+  moduleCameraBindings: {},
+  cameraOpenPromise: null,
+  alertScenarioLogSse: null,
 
-  init() {
+  async init() {
     this.bindTabs();
     this.bindNav();
     this.bindFileInputs();
@@ -31,8 +38,18 @@ const App = {
     this.bindPoliceImageViewer();
     if (this.initSelectChevrons) this.initSelectChevrons();
     if (this.initAssistant) this.initAssistant();
-    if (this.token) this.showMain();
-    else document.getElementById('login-page').classList.add('active');
+    if (this.token) {
+      try {
+        this.currentUser = await this.api('/api/auth/me');
+        this.showMain();
+        return;
+      } catch (_error) {
+        this.token = '';
+        this.currentUser = null;
+        localStorage.removeItem('token');
+      }
+    }
+    document.getElementById('login-page').classList.add('active');
   },
 
   BACKEND_PORT: 8001,
@@ -46,6 +63,12 @@ const App = {
   apiUrl(path) {
     if (!path || /^https?:\/\//i.test(path)) return path;
     return `${this.backendOrigin()}${path.startsWith('/') ? path : `/${path}`}`;
+  },
+
+  eventStreamUrl(path) {
+    const url = new URL(this.apiUrl(path));
+    if (this.token) url.searchParams.set('token', this.token);
+    return url.toString();
   },
 
   wsBase() {
@@ -204,7 +227,11 @@ const App = {
   onViewChange(view) {
     const previousView = this.currentView;
     this.currentView = view;
+    if (view !== 'owner') this.hideStandby();
     if (previousView === 'logs' && view !== 'logs' && this.disconnectLogStream) this.disconnectLogStream();
+    if (previousView === 'alerts' && view !== 'alerts' && this.disconnectAlertScenarioLogStream) {
+      this.disconnectAlertScenarioLogStream();
+    }
     if (view === 'dashboard') this.loadDashboard();
     if (view === 'lpr') { this.loadLprHistory(); this.loadLprModelStatus(); }
     if (view === 'police') { this.loadPolicePoseBackend(); this.loadPoliceGestures(); this.loadPoliceHistory(); this.ensureCameraSelector('police'); }
@@ -212,6 +239,8 @@ const App = {
     if (view === 'alerts') {
       this.connectAlertWs();
       if (this.connectSSE) this.connectSSE();
+      if (this.initRecognitionMirrors) this.initRecognitionMirrors();
+      if (this.connectAlertScenarioLogStream) this.connectAlertScenarioLogStream();
       this.loadAlerts();
       this.loadAlertTypes();
       if (this.loadScenarioFusion) this.loadScenarioFusion();
@@ -229,8 +258,12 @@ const App = {
   },
 
   async login() {
-    const username = document.getElementById('login-user').value;
+    const username = document.getElementById('login-user').value.trim();
     const password = document.getElementById('login-pass').value;
+    if (!username || !password) {
+      alert('请输入用户名和密码');
+      return;
+    }
     try {
       const data = await this.api('/api/auth/login', {
         method: 'POST',
@@ -245,16 +278,25 @@ const App = {
   async register() {
     const username = document.getElementById('register-user').value.trim();
     const password = document.getElementById('register-pass').value;
-    const email = document.getElementById('register-email').value.trim() || null;
-    const phone = document.getElementById('register-phone').value.trim() || null;
-    if (!username || !password) {
-      alert('请输入用户名和密码');
+    const passwordConfirm = document.getElementById('register-pass-confirm').value;
+    const email = document.getElementById('register-email').value.trim();
+    const verificationCode = document.getElementById('register-code').value.trim();
+    if (!username || !password || !email || !verificationCode) {
+      alert('请完整填写注册信息');
+      return;
+    }
+    if (password.length < 8) {
+      alert('密码至少需要 8 位');
+      return;
+    }
+    if (password !== passwordConfirm) {
+      alert('两次输入的密码不一致');
       return;
     }
     try {
       const data = await this.api('/api/auth/register', {
         method: 'POST',
-        body: JSON.stringify({ username, password, email, phone }),
+        body: JSON.stringify({ username, password, email, verification_code: verificationCode }),
       });
       this.token = data.access_token;
       localStorage.setItem('token', this.token);
@@ -309,24 +351,53 @@ const App = {
     document.body.style.overflow = '';
   },
 
-  async sendCode() {
-    const target = document.getElementById('code-target').value;
+  async sendCode(purpose) {
+    const isRegister = purpose === 'register';
+    const email = document.getElementById(isRegister ? 'register-email' : 'code-email').value.trim();
+    const button = document.getElementById(isRegister ? 'register-code-button' : 'login-code-button');
+    if (!email) {
+      alert('请输入邮箱');
+      return;
+    }
     try {
       const data = await this.api('/api/auth/send-code', {
         method: 'POST',
-        body: JSON.stringify({ target, target_type: target.includes('@') ? 'email' : 'phone' }),
+        body: JSON.stringify({ email, purpose }),
       });
-      alert('验证码: ' + data.code + ' (演示模式直接显示)');
+      alert(data.message);
+      this.startCodeCountdown(button);
     } catch (e) { alert(e.message); }
   },
 
+  startCodeCountdown(button, seconds = 60) {
+    if (!button) return;
+    const originalText = button.textContent;
+    button.disabled = true;
+    let remaining = seconds;
+    button.textContent = `${remaining} 秒后重试`;
+    const timer = setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        clearInterval(timer);
+        button.disabled = false;
+        button.textContent = originalText;
+        return;
+      }
+      button.textContent = `${remaining} 秒后重试`;
+    }, 1000);
+  },
+
   async loginCode() {
-    const target = document.getElementById('code-target').value;
-    const code = document.getElementById('code-input').value;
+    const email = document.getElementById('code-email').value.trim();
+    const code = document.getElementById('code-input').value.trim();
+    if (!email || !code) {
+      alert('请输入注册邮箱和验证码');
+      return;
+    }
     try {
       const data = await this.api('/api/auth/login-code', {
         method: 'POST',
-        body: JSON.stringify({ target, code, target_type: target.includes('@') ? 'email' : 'phone' }),
+        body: JSON.stringify({ email, code }),
       });
       this.token = data.access_token;
       localStorage.setItem('token', this.token);
@@ -362,17 +433,30 @@ const App = {
     if (this.connectSSE) this.connectSSE();
     if (this.refreshAgentStats) this.refreshAgentStats();
     if (this.startAgentMonitorLoop) this.startAgentMonitorLoop();
-    if (this.token) {
+    if (this.currentUser) {
+      document.getElementById('user-info').textContent = this.currentUser.username;
+    } else if (this.token) {
       this.api('/api/auth/me').then(u => {
+        this.currentUser = u;
         document.getElementById('user-info').textContent = u.username;
       }).catch(() => {});
     }
   },
 
-  logout() {
+  async logout() {
+    try {
+      await this.stopVideoStream();
+    } catch (_error) {}
+    if (this.stopAllModuleStreams) this.stopAllModuleStreams();
+    if (this.token) {
+      try {
+        await this.api('/api/auth/logout', { method: 'POST' });
+      } catch (_error) {}
+    }
     this.token = '';
+    this.currentUser = null;
     localStorage.removeItem('token');
-    this.stopVideoStream();
+    if (this.disconnectAlertScenarioLogStream) this.disconnectAlertScenarioLogStream();
     if (this.disconnectSSE) this.disconnectSSE();
     if (this.stopAgentMonitorLoop) this.stopAgentMonitorLoop();
     location.reload();
@@ -651,19 +735,106 @@ const App = {
     }
   },
 
+  streamRuntime(module) {
+    if (!this.moduleStreams) this.moduleStreams = {};
+    if (!this.moduleStreams[module]) {
+      this.moduleStreams[module] = {
+        ws: null, interval: null, timeout: null, busy: false, mode: null, source: '',
+        generation: 0, failed: false,
+      };
+    }
+    return this.moduleStreams[module];
+  },
+
+  networkStreamLabel(url) {
+    try {
+      const parsed = new URL(url);
+      return `${parsed.protocol.replace(':', '').toUpperCase()} · ${parsed.hostname || '网络流'}`;
+    } catch (e) {
+      return '网络视频流';
+    }
+  },
+
+  isCurrentModuleRun(module, generation) {
+    const runtime = this.streamRuntime(module);
+    return runtime.generation === generation;
+  },
+
+  claimModuleRun(module) {
+    const runtime = this.streamRuntime(module);
+    runtime.generation = (runtime.generation || 0) + 1;
+    return runtime.generation;
+  },
+
+  removeCameraInfo(info, stopTracks = true) {
+    if (!info) return;
+    if (stopTracks) info.stream?.getTracks?.().forEach(track => track.stop());
+    for (const [key, value] of this.cameraSources.entries()) {
+      if (value === info) this.cameraSources.delete(key);
+    }
+  },
+
+  scheduleUnusedCameraCleanup(info) {
+    setTimeout(() => {
+      if (!info?.modules?.size && !Object.values(this.moduleCameraBindings || {}).includes(info)) {
+        this.removeCameraInfo(info);
+      }
+    }, 0);
+  },
+
+  bindModuleCamera(module, info, aliases = []) {
+    if (!info?.stream) return null;
+    info.modules = info.modules || new Set();
+    info.aliases = info.aliases || new Set();
+    info.modules.add(module);
+    aliases.filter(Boolean).forEach(alias => {
+      info.aliases.add(alias);
+      this.cameraSources.set(alias, info);
+    });
+    this.moduleCameraBindings[module] = info;
+    return info.stream;
+  },
+
+  releaseModuleCamera(module) {
+    const info = this.moduleCameraBindings[module];
+    delete this.moduleCameraBindings[module];
+    const video = document.getElementById(module + '-video');
+    if (video?.srcObject === info?.stream) video.srcObject = null;
+    if (!info) return;
+    info.modules?.delete(module);
+    if (info.modules?.size) return;
+    this.removeCameraInfo(info);
+  },
+
+  handleSharedCameraEnded(info) {
+    if (!info) return;
+    const modules = [...(info.modules || [])];
+    modules.forEach(module => {
+      const source = this.streamRuntime(module).source || info.label || '摄像头';
+      this.stopStream(module);
+      this.setRecognitionMirrorStatus?.(module, 'error', '摄像头已断开', source, { clearPreview: true });
+    });
+    this.removeCameraInfo(info, false);
+  },
+
   startUploadedPoliceVideo() {
-    this.stopStream();
+    this.stopStream('police');
     const video = document.getElementById('police-upload-preview');
     const canvas = document.getElementById('police-canvas');
     const resultBox = document.getElementById('police-result');
     if (!video || !canvas) return;
     if (resultBox) resultBox.innerHTML = '播放视频后开始实时识别...';
 
-    this.streamModule = 'police';
-    this.streamBusy = false;
+    const runtime = this.streamRuntime('police');
+    runtime.mode = 'video';
+    runtime.source = '本地视频';
+    runtime.busy = false;
     this.uploadedRecognitionResults = [];
     const ctx = canvas.getContext('2d');
-    this.wsStream = new WebSocket(`${this.wsBase()}/ws/stream/police`);
+    const tokenQuery = this.token ? `?token=${encodeURIComponent(this.token)}` : '';
+    const ws = new WebSocket(`${this.wsBase()}/ws/stream/police${tokenQuery}`);
+    runtime.ws = ws;
+    this.setRecognitionMirrorStatus?.('police', 'connecting', '正在连接识别服务', runtime.source);
     const sampleFps = 15;
     const sampleMs = 1000 / sampleFps;
     let processedFrames = 0;
@@ -677,6 +848,9 @@ const App = {
       const now = Number.isFinite(video.currentTime) ? video.currentTime : row.time_sec;
       const lag = Math.max(0, now - row.time_sec);
       resultBox.innerHTML = `${row.gesture_cn}<br><small>置信度 ${(row.confidence * 100).toFixed(0)}%</small><br><small>video ${now.toFixed(1)}s / label ${row.time_sec.toFixed(1)}s / lag ${lag.toFixed(1)}s</small>`;
+      this.publishRecognitionResult?.('police', row, {
+        status: 'running', statusText: '实时识别中', source: runtime.source,
+      });
     };
 
     const updateStatus = () => {
@@ -691,24 +865,22 @@ const App = {
     };
 
     const sendCurrentFrame = () => {
-      if (!this.streamModule || this.wsStream?.readyState !== WebSocket.OPEN) return;
-      if (video.paused || video.ended || video.readyState < 2 || this.streamBusy) return;
+      if (runtime.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
+      if (video.paused || video.ended || video.readyState < 2 || runtime.busy) return;
       const timeSec = Number.isFinite(video.currentTime) ? video.currentTime : 0;
       if (timeSec <= lastResultAt && processedFrames > 0) return;
-      this.streamBusy = true;
+      runtime.busy = true;
       updateStatus();
       canvas.width = video.videoWidth || 512;
       canvas.height = video.videoHeight || 512;
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       const dataUrl = canvas.toDataURL('image/jpeg', 0.72);
-      this.wsStream.send(JSON.stringify({ type: 'frame', data: dataUrl.split(',')[1], time_sec: timeSec }));
-      this.streamTimeout = setTimeout(() => {
-        this.streamBusy = false;
-      }, 5000);
+      ws.send(JSON.stringify({ type: 'frame', data: dataUrl.split(',')[1], time_sec: timeSec }));
+      runtime.timeout = setTimeout(() => { runtime.busy = false; }, 5000);
     };
 
     const tick = () => {
-      if (!this.streamModule) return;
+      if (runtime.ws !== ws) return;
       const now = performance.now();
       if (now - lastSentAt >= sampleMs) {
         lastSentAt = now;
@@ -717,7 +889,8 @@ const App = {
       if (!video.paused && !video.ended) updateStatus();
     };
 
-    this.wsStream.onopen = () => {
+    ws.onopen = () => {
+      this.setRecognitionMirrorStatus?.('police', 'running', '实时识别中', runtime.source);
       video.onplay = () => {
         waitingForFirstPlay = false;
         const button = document.getElementById('police-upload-play');
@@ -730,16 +903,19 @@ const App = {
         if (resultBox) resultBox.dataset.status = 'paused';
       };
       video.onseeked = () => { lastResultAt = -1; updateStatus(); };
-      this.streamInterval = setInterval(tick, 40);
+      video.onended = () => {
+        this.setRecognitionMirrorStatus?.('police', 'complete', '视频识别已结束', runtime.source);
+      };
+      runtime.interval = setInterval(tick, 40);
       updateStatus();
     };
 
-    this.wsStream.onmessage = (e) => {
-      if (this.streamTimeout) {
-        clearTimeout(this.streamTimeout);
-        this.streamTimeout = null;
+    ws.onmessage = (e) => {
+      if (runtime.timeout) {
+        clearTimeout(runtime.timeout);
+        runtime.timeout = null;
       }
-      this.streamBusy = false;
+      runtime.busy = false;
       const msg = JSON.parse(e.data);
       if (msg.type === 'result') {
         processedFrames += 1;
@@ -754,12 +930,26 @@ const App = {
       }
     };
 
-    this.wsStream.onerror = () => {
+    ws.onerror = () => {
       if (resultBox) resultBox.innerHTML = '实时视频识别连接失败';
+      this.setRecognitionMirrorStatus?.('police', 'error', '识别连接失败', runtime.source);
     };
   },
 
   renderResult(module, data, opts = {}) {
+    const mirrorStatus = opts.mirrorStatus
+      || ((opts.video || opts.realtime) ? 'running' : 'complete');
+    const acceptMirrorVehicleState = module !== 'owner'
+      || !opts.realtime
+      || Boolean(data.action)
+      || Boolean(data.confirmation_resolved);
+    this.publishRecognitionResult?.(module, data, {
+      status: mirrorStatus,
+      statusText: opts.mirrorStatusText,
+      source: opts.mirrorSource,
+      previewUrl: opts.mirrorPreviewUrl,
+      acceptVehicleState: acceptMirrorVehicleState,
+    });
     if (module === 'lpr') {
       const isVideo = opts.video === true;
       const resultBoxId = isVideo ? 'lpr-video-result' : 'lpr-image-result';
@@ -772,13 +962,13 @@ const App = {
       const camVideo = document.getElementById('lpr-video');
       const canvas = document.getElementById('lpr-canvas');
       const preview = document.getElementById('lpr-preview');
-      if (!isVideo && data.annotated_image && preview) {
+      if (data.annotated_image && preview && (!isVideo || opts.camera)) {
         preview.src = 'data:image/jpeg;base64,' + data.annotated_image;
       }
       if (isVideo) {
-        if (preview) preview.removeAttribute('src');
+        if (preview && !opts.camera) preview.removeAttribute('src');
         if (fileVideo) fileVideo.hidden = true;
-        if (camVideo) camVideo.hidden = true;
+        if (camVideo) camVideo.hidden = !opts.camera;
         if (canvas) canvas.hidden = true;
         const imgResult = document.getElementById('lpr-image-result');
         if (imgResult) imgResult.innerHTML = '';
@@ -841,8 +1031,9 @@ const App = {
       document.getElementById('police-result').innerHTML = `${data.gesture_cn}<br><small>置信度 ${(data.confidence*100).toFixed(0)}%</small>`;
       this.loadPoliceHistory();
     } else if (module === 'owner') {
-      if (this.isOwnerStandbyLocked() && !this.isWakeResult(data)) {
-        this.showStandby();
+      const isStandbyPhoneShortcut = ['answer_call', 'hang_up'].includes(data.action);
+      if (this.isOwnerStandbyLocked() && !this.isWakeResult(data) && !isStandbyPhoneShortcut) {
+        if (this.currentView === 'owner') this.showStandby();
         return;
       }
       const preview = document.getElementById('owner-preview');
@@ -978,7 +1169,7 @@ const App = {
     const select = document.getElementById('police-pose-backend');
     const status = document.getElementById('police-pose-backend-status');
     const backend = select?.value || 'ctpgr';
-    this.stopStream();
+    this.stopStream('police');
     if (status) status.textContent = 'switching...';
     try {
       const data = await this.api('/api/police-gesture/pose-backend', {
@@ -1041,8 +1232,9 @@ const App = {
   },
 
   async respondGestureConfirm(accept) {
-    if (this.wsStream?.readyState === WebSocket.OPEN && this.streamModule === 'owner') {
-      this.wsStream.send(JSON.stringify({ type: 'confirm', accept }));
+    const ownerRuntime = this.streamRuntime('owner');
+    if (ownerRuntime.mode !== 'network' && ownerRuntime.ws?.readyState === WebSocket.OPEN) {
+      ownerRuntime.ws.send(JSON.stringify({ type: 'confirm', accept }));
     } else {
       const result = await this.api(`/api/owner-gesture/confirm?accept=${accept}`, { method: 'POST' });
       if (result.vehicle_state) this.applyVehicleState(result.vehicle_state);
@@ -1051,19 +1243,26 @@ const App = {
   },
 
   applyVehicleState(s) {
+    if (!s) return;
+    this.ownerVehicleState = { ...s };
     document.getElementById('v-awake').textContent = s.is_awake ? '已唤醒' : '休眠';
-    this.ownerCurrentControl = s.current_page || 'volume_up';
+    const controlItems = ['volume_up', 'volume_down', 'temp_up', 'temp_down'];
+    this.ownerCurrentControl = controlItems.includes(s.current_page) ? s.current_page : 'volume_up';
     const names = { volume_up: '音量 +', volume_down: '音量 -', temp_up: '温度 +', temp_down: '温度 -', standby: '待机主页' };
-    document.getElementById('v-page').textContent = names[s.current_page] || s.current_page;
+    document.getElementById('v-page').textContent = names[this.ownerCurrentControl] || this.ownerCurrentControl;
     document.getElementById('v-volume').value = s.volume;
     document.getElementById('v-volume-val').textContent = s.volume;
     document.getElementById('v-temp').value = s.temperature;
     document.getElementById('v-temp-val').textContent = s.temperature;
-    document.getElementById('v-phone').textContent = s.phone_status === 'in_call' ? '通话中' : '空闲';
-    this.updateOwnerFunctionHighlight(s.current_page);
+    this.updatePhoneState(s.phone_status);
+    this.updateOwnerFunctionHighlight(this.ownerCurrentControl);
+    this.publishOwnerVehicleState?.(this.ownerVehicleState);
     if (s.current_page === 'standby' && !s.is_awake) {
-      if (this.isOwnerStandbyLocked() || !this.ownerStandbyDismissed) this.showStandby();
-      else this.hideStandby();
+      if (this.currentView === 'owner' && (this.isOwnerStandbyLocked() || !this.ownerStandbyDismissed)) {
+        this.showStandby();
+      } else {
+        this.hideStandby();
+      }
     } else {
       this.ownerStandbyLockedUntil = 0;
       this.ownerStandbyDismissed = false;
@@ -1072,10 +1271,28 @@ const App = {
   },
 
   updateOwnerFunctionHighlight(current) {
-    const selected = current && current !== 'standby' ? current : 'volume_up';
+    const controlItems = ['volume_up', 'volume_down', 'temp_up', 'temp_down'];
+    const selected = controlItems.includes(current) ? current : 'volume_up';
+    this.ownerCurrentControl = selected;
     document.querySelectorAll('#owner-function-selector .function-card').forEach(card => {
-      card.classList.toggle('active', card.dataset.control === selected);
+      const isSelected = card.dataset.control === selected;
+      card.classList.toggle('active', isSelected);
+      card.setAttribute('aria-current', isSelected ? 'true' : 'false');
     });
+  },
+
+  updatePhoneState(status) {
+    const inCall = status === 'in_call';
+    const phone = document.getElementById('v-phone');
+    const answer = document.getElementById('v-answer');
+    const hangup = document.getElementById('v-hangup');
+    phone.textContent = inCall ? '通话中' : '空闲';
+    phone.classList.toggle('in-call', inCall);
+    phone.classList.toggle('idle', !inCall);
+    answer.classList.toggle('active', inCall);
+    hangup.classList.toggle('active', !inCall);
+    answer.setAttribute('aria-pressed', inCall ? 'true' : 'false');
+    hangup.setAttribute('aria-pressed', inCall ? 'false' : 'true');
   },
 
   isOwnerStandbyLocked() {
@@ -1095,7 +1312,7 @@ const App = {
       this.ownerStandbyLockedUntil || 0,
       Date.now() + Math.max(0, lockMs),
     );
-    this.showStandby();
+    if (this.currentView === 'owner') this.showStandby();
   },
 
   showStandby() {
@@ -1126,6 +1343,7 @@ const App = {
     this.ownerStandbyDismissed = true;
     this.ownerStandbyLockedUntil = 0;
     this.hideStandby();
+    this.currentView = 'owner';
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector('.nav-item[data-view="owner"]')?.classList.add('active');
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
@@ -1156,7 +1374,7 @@ const App = {
   },
 
   setPhone(status) {
-    document.getElementById('v-phone').textContent = status === 'in_call' ? '通话中' : '空闲';
+    this.updatePhoneState(status);
     this.updateVehicle();
   },
 
@@ -1238,17 +1456,49 @@ const App = {
   },
 
   async openCameraStream(module) {
+    return this.openCameraStreamForRun(module, null);
+  },
+
+  async openCameraStreamForRun(module, generation = null) {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error('当前浏览器不支持 getUserMedia 摄像头接口');
     }
+    const assertCurrent = () => {
+      if (generation === null || this.isCurrentModuleRun(module, generation)) return;
+      const error = new Error('摄像头启动已取消');
+      error.name = 'AbortError';
+      throw error;
+    };
     await this.ensureCameraSelector(module);
+    assertCurrent();
     const select = document.getElementById(`${module}-camera-device`);
     const status = document.getElementById(`${module}-camera-status`);
     const selectedDevice = select?.value || '';
     const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+    assertCurrent();
     const cameras = devices
       .filter(device => device.kind === 'videoinput' && device.deviceId)
       .sort((left, right) => this.cameraDevicePriority(left) - this.cameraDevicePriority(right));
+    const requestedKey = selectedDevice || 'default';
+    const shared = this.cameraSources.get(requestedKey);
+    if (shared?.stream?.active) {
+      this.bindModuleCamera(module, shared, [requestedKey, shared.deviceId]);
+      if (status) status.textContent = `共享连接：${shared.label || '摄像头'}`;
+      return shared.stream;
+    }
+
+    // 串行化首次采集，避免两个模块同时调用 getUserMedia 时独占设备互相抢占。
+    while (this.cameraOpenPromise) {
+      try { await this.cameraOpenPromise; } catch (e) {}
+      assertCurrent();
+      const openedWhileWaiting = this.cameraSources.get(requestedKey);
+      if (openedWhileWaiting?.stream?.active) {
+        this.bindModuleCamera(module, openedWhileWaiting, [requestedKey, openedWhileWaiting.deviceId]);
+        if (status) status.textContent = `共享连接：${openedWhileWaiting.label || '摄像头'}`;
+        return openedWhileWaiting.stream;
+      }
+    }
+
     const baseVideo = {
       width: { ideal: 640 },
       height: { ideal: 480 },
@@ -1269,23 +1519,71 @@ const App = {
     attempts.push({ video: baseVideo, audio: false });
     attempts.push({ video: true, audio: false });
 
-    let lastError = null;
-    for (const constraints of attempts) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        const activeTrack = stream.getVideoTracks()[0];
-        const activeDeviceId = activeTrack?.getSettings?.().deviceId || '';
-        const activeCamera = cameras.find(device => device.deviceId === activeDeviceId);
-        if (select && activeDeviceId && [...select.options].some(option => option.value === activeDeviceId)) {
-          select.value = activeDeviceId;
+    const opening = (async () => {
+      let lastError = null;
+      for (const constraints of attempts) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          const activeTrack = stream.getVideoTracks()[0];
+          const activeDeviceId = activeTrack?.getSettings?.().deviceId || '';
+          const activeCamera = cameras.find(device => device.deviceId === activeDeviceId);
+          const existing = activeDeviceId ? this.cameraSources.get(activeDeviceId) : null;
+          if (existing?.stream?.active) {
+            stream.getTracks().forEach(track => track.stop());
+            existing.aliases = existing.aliases || new Set();
+            const aliases = [activeDeviceId];
+            if (!selectedDevice || selectedDevice === activeDeviceId) aliases.push(requestedKey);
+            aliases.filter(Boolean).forEach(alias => {
+              existing.aliases.add(alias);
+              this.cameraSources.set(alias, existing);
+            });
+            return existing;
+          }
+          const info = {
+            stream,
+            deviceId: activeDeviceId,
+            label: activeTrack?.label || activeCamera?.label || '摄像头',
+            modules: new Set(),
+            aliases: new Set(),
+          };
+          const aliases = [activeDeviceId];
+          if (!selectedDevice || selectedDevice === activeDeviceId) aliases.push(requestedKey);
+          aliases.filter(Boolean).forEach(alias => {
+            info.aliases.add(alias);
+            this.cameraSources.set(alias, info);
+          });
+          activeTrack?.addEventListener?.('ended', () => this.handleSharedCameraEnded(info));
+          return info;
+        } catch (error) {
+          lastError = error;
+          const reusable = this.cameraSources.get(requestedKey)
+            || orderedDeviceIds.map(deviceId => this.cameraSources.get(deviceId)).find(Boolean);
+          if (reusable?.stream?.active) return reusable;
         }
-        if (status) status.textContent = `已连接：${activeTrack?.label || activeCamera?.label || '摄像头'}`;
-        return stream;
-      } catch (error) {
-        lastError = error;
       }
+      throw lastError || new Error('摄像头启动失败');
+    })();
+    this.cameraOpenPromise = opening;
+    let info;
+    try {
+      info = await opening;
+    } finally {
+      if (this.cameraOpenPromise === opening) this.cameraOpenPromise = null;
     }
-    throw lastError || new Error('摄像头启动失败');
+    try {
+      assertCurrent();
+    } catch (error) {
+      this.scheduleUnusedCameraCleanup(info);
+      throw error;
+    }
+    if (select && info.deviceId && [...select.options].some(option => option.value === info.deviceId)) {
+      select.value = info.deviceId;
+    }
+    const bindingAliases = [info.deviceId];
+    if (!selectedDevice || selectedDevice === info.deviceId) bindingAliases.push(requestedKey);
+    this.bindModuleCamera(module, info, bindingAliases);
+    if (status) status.textContent = `${info.modules.size > 1 ? '共享连接' : '已连接'}：${info.label}`;
+    return info.stream;
   },
 
   async openPoliceCameraStream() {
@@ -1293,67 +1591,73 @@ const App = {
   },
 
   async startStream(module) {
-    if (module === 'lpr') {
-      this.stopVideoStream();
-      this.lprVideoMode = 'camera';
-      const video = document.getElementById('lpr-video');
-      const canvas = document.getElementById('lpr-canvas');
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        video.srcObject = stream;
-        video.controls = false;
-        video.hidden = false;
-        const fileVideo = document.getElementById('lpr-video-output');
-        if (fileVideo) fileVideo.hidden = true;
-        if (canvas) canvas.hidden = false;
-        document.getElementById('lpr-results').innerHTML =
-          '<div class="result-banner"><div class="result-title">摄像头实时识别中…</div></div>';
-        await this.connectLprVideoWs();
-        this.lprVideoTimer = setInterval(() => this.captureAndSendLprFrame(video, canvas), 350);
-      } catch (e) { alert('无法访问摄像头: ' + e.message); }
-      return;
-    }
-
-    this.stopStream();
-    this.streamModule = module;
+    if (!['lpr', 'police', 'owner'].includes(module)) return;
+    if (module === 'lpr') await this.stopVideoStream();
+    else this.stopStream(module);
+    const runtime = this.streamRuntime(module);
+    runtime.mode = 'camera';
+    runtime.source = '摄像头';
+    runtime.failed = false;
+    const generation = this.claimModuleRun(module);
+    const isCurrent = () => this.isCurrentModuleRun(module, generation);
     const video = document.getElementById(module + '-video');
     const canvas = document.getElementById(module + '-canvas');
+    const resultMap = { lpr: 'lpr-video-result', police: 'police-result', owner: 'owner-result' };
+    const resultBox = document.getElementById(resultMap[module]);
+    this.setRecognitionMirrorStatus?.(module, 'connecting', '正在请求摄像头', runtime.source);
     try {
-      const resultMap = { police: 'police-result', owner: 'owner-result' };
-      const resultBox = document.getElementById(resultMap[module]);
+      if (!video || !canvas) throw new Error('识别画面组件不存在');
       if (resultBox) resultBox.innerHTML = '正在请求摄像头权限…';
       const streamPreview = module === 'police' ? document.getElementById('police-stream-preview') : null;
       if (streamPreview) {
         streamPreview.hidden = true;
         streamPreview.removeAttribute('src');
       }
-      const stream = await this.openCameraStream(module);
+      const stream = await this.openCameraStreamForRun(module, generation);
+      if (!isCurrent()) return;
+      const track = stream.getVideoTracks()[0];
+      runtime.source = track?.label || '摄像头';
       video.srcObject = stream;
       video.muted = true;
       video.playsInline = true;
       video.hidden = false;
       canvas.hidden = true;
       await video.play();
+      if (!isCurrent()) return;
       await this.refreshCameraDevices(module);
+      if (!isCurrent()) return;
       if (resultBox) resultBox.innerHTML = '摄像头已打开，正在连接识别服务…';
       const ctx = canvas.getContext('2d');
-      const statusEl = document.getElementById('lpr-video-model-status');
-      if (statusEl) statusEl.textContent = '摄像头已打开，等待识别结果…';
 
+      const tokenQuery = this.token ? `?token=${encodeURIComponent(this.token)}` : '';
       const wsUrl = module === 'owner'
         ? `${this.wsBase()}/api/owner-gesture/ws-stream?token=${encodeURIComponent(this.token || '')}`
-        : `${this.wsBase()}/ws/stream/${module}`;
-      this.wsStream = new WebSocket(wsUrl);
-      this.wsStream.onopen = () => {
-        if (resultBox) resultBox.innerHTML = '摄像头和识别服务已连接，等待手势…';
-        if (module === 'owner') this.wsStream.send(JSON.stringify({ type: 'ping' }));
+        : `${this.wsBase()}/ws/stream/${module}${tokenQuery}`;
+      const ws = new WebSocket(wsUrl);
+      runtime.ws = ws;
+      ws.onopen = () => {
+        if (!isCurrent() || runtime.ws !== ws) return;
+        if (resultBox) resultBox.innerHTML = module === 'lpr'
+          ? '摄像头和识别服务已连接，正在识别车牌…'
+          : '摄像头和识别服务已连接，等待手势…';
+        this.setRecognitionMirrorStatus?.(module, 'running', '实时识别中', runtime.source);
+        if (module === 'owner') ws.send(JSON.stringify({ type: 'ping' }));
       };
-      this.wsStream.onmessage = (e) => {
+      ws.onmessage = (e) => {
+        if (!isCurrent() || runtime.ws !== ws) return;
         const msg = JSON.parse(e.data);
-        this.streamBusy = false;
+        runtime.busy = false;
         if (msg.type === 'result') {
+          runtime.failed = false;
           if (module === 'owner' && msg.data?.action === 'go_home') this.forceStandby(1500);
-          this.renderResult(module, msg.data, { realtime: module === 'owner' });
+          const renderOptions = { realtime: module === 'owner' };
+          renderOptions.mirrorSource = runtime.source;
+          renderOptions.mirrorStatus = 'running';
+          if (module === 'lpr') {
+            renderOptions.video = true;
+            renderOptions.camera = true;
+          }
+          this.renderResult(module, msg.data, renderOptions);
           if (module === 'police') this.savePoliceHistoryRecord(msg.data, 'camera');
         }
         if (msg.type === 'confirmed') {
@@ -1361,41 +1665,54 @@ const App = {
           this.hideGestureConfirm();
         }
         if (msg.type === 'frame_error' || msg.type === 'error') {
-          const resultMap = { police: 'police-result', owner: 'owner-result' };
-          const resultBox = document.getElementById(resultMap[module]);
+          if (msg.type === 'error') runtime.failed = true;
           if (resultBox) resultBox.innerHTML = `识别失败：${msg.message}`;
+          this.setRecognitionMirrorStatus?.(module, 'error', msg.message || '识别失败', runtime.source);
         }
       };
-      this.wsStream.onerror = () => {
-        this.streamBusy = false;
+      ws.onerror = () => {
+        if (!isCurrent() || runtime.ws !== ws) return;
+        runtime.busy = false;
+        runtime.failed = true;
         if (resultBox) resultBox.innerHTML = '摄像头已打开，但识别服务连接失败，请检查后端服务。';
+        this.setRecognitionMirrorStatus?.(module, 'error', '识别服务连接失败', runtime.source);
       };
-      this.wsStream.onclose = () => { this.streamBusy = false; };
+      ws.onclose = () => {
+        if (!isCurrent()) return;
+        runtime.busy = false;
+        if (runtime.ws === ws) {
+          runtime.ws = null;
+          if (!runtime.failed) this.setRecognitionMirrorStatus?.(module, 'idle', '连接已停止', runtime.source);
+        }
+      };
 
-      const frameIntervalMs = module === 'police' ? 80 : 200;
-      this.streamInterval = setInterval(() => {
-        const canSend = module === 'owner' || !this.streamBusy;
-        if (video.readyState >= 2 && this.wsStream?.readyState === WebSocket.OPEN && canSend) {
-          if (module !== 'owner') this.streamBusy = true;
+      const frameIntervalMs = module === 'lpr' ? 80 : (module === 'police' ? 80 : 200);
+      runtime.interval = setInterval(() => {
+        if (!isCurrent() || runtime.ws !== ws) return;
+        const canSend = module === 'owner' || !runtime.busy;
+        if (video.readyState >= 2 && ws.readyState === WebSocket.OPEN && canSend) {
+          if (module !== 'owner') runtime.busy = true;
           canvas.width = video.videoWidth;
           canvas.height = video.videoHeight;
           ctx.drawImage(video, 0, 0);
           const dataUrl = canvas.toDataURL('image/jpeg', module === 'owner' ? 0.6 : 0.7);
-          this.wsStream.send(JSON.stringify({ type: 'frame', data: dataUrl.split(',')[1] }));
+          ws.send(JSON.stringify({ type: 'frame', data: dataUrl.split(',')[1] }));
         }
       }, frameIntervalMs);
     } catch (e) {
-      this.stopStream();
+      if (!isCurrent() || e?.name === 'AbortError') return;
+      const source = runtime.source;
+      this.stopStream(module);
       const message = this.cameraErrorMessage(e);
-      const resultMap = { police: 'police-result', owner: 'owner-result' };
-      const resultBox = document.getElementById(resultMap[module]);
       if (resultBox) resultBox.innerHTML = message;
+      this.setRecognitionMirrorStatus?.(module, 'error', message, source);
       alert(message);
     }
   },
 
   startUrlStream(module) {
-    this.stopStream();
+    if (!['police', 'owner'].includes(module)) return;
+    this.stopStream(module);
     const input = document.getElementById(module + '-stream-url');
     const url = (input?.value || '').trim();
     if (!url) {
@@ -1403,10 +1720,16 @@ const App = {
       return;
     }
 
-    this.streamModule = module;
+    const runtime = this.streamRuntime(module);
+    runtime.mode = 'network';
+    runtime.source = this.networkStreamLabel(url);
+    runtime.failed = false;
+    const generation = this.claimModuleRun(module);
+    const isCurrent = () => this.isCurrentModuleRun(module, generation);
     const resultMap = { lpr: 'lpr-results', police: 'police-result', owner: 'owner-result' };
     const resultBox = document.getElementById(resultMap[module]);
     if (resultBox) resultBox.innerHTML = '正在连接视频流...';
+    this.setRecognitionMirrorStatus?.(module, 'connecting', '正在连接视频流', runtime.source);
     const streamPreview = module === 'police' ? document.getElementById('police-stream-preview') : null;
     if (streamPreview) {
       const video = document.getElementById('police-video');
@@ -1417,28 +1740,51 @@ const App = {
       streamPreview.removeAttribute('src');
     }
 
-    this.wsStream = new WebSocket(`${this.wsBase()}/ws/stream-url/${module}`);
-    this.wsStream.onopen = () => {
-      this.wsStream.send(JSON.stringify({ type: 'start', url, interval: 1, target_fps: 15 }));
+    const tokenQuery = this.token ? `?token=${encodeURIComponent(this.token)}` : '';
+    const ws = new WebSocket(`${this.wsBase()}/ws/stream-url/${module}${tokenQuery}`);
+    runtime.ws = ws;
+    ws.onopen = () => {
+      if (!isCurrent() || runtime.ws !== ws) return;
+      ws.send(JSON.stringify({ type: 'start', url, interval: 1, target_fps: 15 }));
     };
-    this.wsStream.onmessage = (e) => {
+    ws.onmessage = (e) => {
+      if (!isCurrent() || runtime.ws !== ws) return;
       const msg = JSON.parse(e.data);
-      if (msg.type === 'status' && resultBox) resultBox.innerHTML = '视频流已连接，正在识别...';
+      if (msg.type === 'status') {
+        if (resultBox) resultBox.innerHTML = '视频流已连接，正在识别...';
+        this.setRecognitionMirrorStatus?.(module, 'running', '实时识别中', runtime.source);
+      }
       if (msg.type === 'result') {
+        runtime.failed = false;
         if (streamPreview && msg.data?.annotated_image) {
           streamPreview.src = 'data:image/jpeg;base64,' + msg.data.annotated_image;
           streamPreview.hidden = false;
         }
-        this.renderResult(module, msg.data, { realtime: module === 'owner' });
+        const renderOptions = { realtime: module === 'owner' };
+        renderOptions.mirrorSource = runtime.source;
+        renderOptions.mirrorStatus = 'running';
+        this.renderResult(module, msg.data, renderOptions);
         if (module === 'police') this.savePoliceHistoryRecord(msg.data, 'stream');
       }
-      if (msg.type === 'error') {
+      if (msg.type === 'error' || msg.type === 'frame_error') {
+        if (msg.type === 'error') runtime.failed = true;
         if (resultBox) resultBox.innerHTML = `视频流错误：${msg.message}`;
         else alert(msg.message);
+        this.setRecognitionMirrorStatus?.(module, 'error', msg.message || '视频流错误', runtime.source);
       }
     };
-    this.wsStream.onerror = () => {
+    ws.onerror = () => {
+      if (!isCurrent() || runtime.ws !== ws) return;
+      runtime.failed = true;
       if (resultBox) resultBox.innerHTML = '视频流连接失败';
+      this.setRecognitionMirrorStatus?.(module, 'error', '视频流连接失败', runtime.source);
+    };
+    ws.onclose = () => {
+      if (!isCurrent()) return;
+      if (runtime.ws === ws) {
+        runtime.ws = null;
+        if (!runtime.failed) this.setRecognitionMirrorStatus?.(module, 'idle', '连接已停止', runtime.source);
+      }
     };
   },
 
@@ -1521,7 +1867,7 @@ const App = {
   },
 
   async startLprRtspStream() {
-    this.stopVideoStream();
+    await this.stopVideoStream();
     this.lprVideoMode = 'rtsp';
     this.lprRtspMode = 'rtsp';
     const urlInput = document.getElementById('lpr-rtsp-url');
@@ -1539,6 +1885,15 @@ const App = {
       alert('请输入 RTSP 地址');
       return;
     }
+    const mirrorSource = presetLabel || this.networkStreamLabel(rtspUrl);
+    const runtime = this.streamRuntime('lpr');
+    runtime.mode = 'rtsp';
+    runtime.source = mirrorSource;
+    runtime.url = rtspUrl;
+    runtime.failed = false;
+    const generation = this.claimModuleRun('lpr');
+    const isCurrent = () => this.isCurrentModuleRun('lpr', generation);
+    this.setRecognitionMirrorStatus?.('lpr', 'connecting', '正在连接视频流', mirrorSource);
     if (statusEl) statusEl.textContent = `准备连接 ${presetLabel || source} · ${rtspUrl}`;
     if (progress) progress.classList.remove('hidden');
     if (progressFill) progressFill.style.width = '5%';
@@ -1559,14 +1914,36 @@ const App = {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || 'RTSP 启动失败');
-      this.renderResult('lpr', data, { video: true, skipHistory: true });
-      const previewUrl = data.preview_url || '';
+      if (!isCurrent()) {
+        const current = this.streamRuntime('lpr');
+        if (!(current.mode === 'rtsp' && current.url === rtspUrl)) {
+          await fetch(this.apiUrl('/api/lpr/rtsp/stop'), {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ rtsp_url: rtspUrl, source_name: '__cancelled_start__' }),
+          }).catch(() => {});
+        }
+        return;
+      }
+      this.renderResult('lpr', data, {
+        video: true,
+        skipHistory: true,
+        mirrorSource,
+        mirrorStatus: 'connecting',
+        mirrorStatusText: '等待实时画面',
+      });
+      const rawPreviewUrl = data.preview_url || '';
+      const previewUrl = rawPreviewUrl && this.token
+        ? `${rawPreviewUrl}${rawPreviewUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(this.token)}`
+        : rawPreviewUrl;
       this.lprRtspSourceName = data.source_name || 'live1';
+      this.lprRtspUrl = rtspUrl;
       if (previewUrl) {
         console.log('[RTSP] use preview url:', previewUrl);
         this.setRtspVideo(previewUrl);
         if (this.lprPreviewPoll) clearInterval(this.lprPreviewPoll);
         this.lprPreviewPoll = setInterval(async () => {
+          if (!isCurrent()) return;
           try {
             const status = await this.api(`/api/lpr/preview/${this.lprRtspSourceName}/status`);
             const debug = document.getElementById('lpr-rtsp-debug');
@@ -1580,6 +1957,17 @@ const App = {
             if (plateTarget) {
               plateTarget.innerHTML = (status.plates || []).map(p => `<div class="plate-item"><span class="number">${this.formatPlateNumber(p.plate_number)}</span><span class="color ${this.plateColorClass(p.plate_color)}">${p.plate_color || '蓝牌'}</span><span class="history-meta" style="margin-left:.5rem">${((p.confidence || 0) * 100).toFixed(0)}%</span></div>`).join('') || '<p style="color:var(--text-muted)">未检测到车牌</p>';
             }
+            this.publishRecognitionResult?.('lpr', {
+              success: Boolean((status.plates || []).length),
+              plate_count: (status.plates || []).length,
+              plates: status.plates || [],
+              frame: status.frame_index,
+            }, {
+              status: status.running ? 'running' : 'complete',
+              statusText: status.running ? '实时识别中' : '视频流已结束',
+              source: mirrorSource,
+              previewUrl,
+            });
             if (!status.running && this.lprPreviewPoll) {
               clearInterval(this.lprPreviewPoll);
               this.lprPreviewPoll = null;
@@ -1589,19 +1977,32 @@ const App = {
           }
         }, 1000);
       }
+      this.setRecognitionMirrorStatus?.(
+        'lpr', 'running', '实时识别中', mirrorSource, previewUrl ? { previewUrl } : {},
+      );
       if (statusEl) statusEl.textContent = data.message || `RTSP 识别已启动：${presetLabel || source}`;
       if (progressText) progressText.textContent = 'RTSP 识别已启动，正在等待实时结果…';
       if (progressFill) progressFill.style.width = '20%';
     } catch (e) {
+      if (!isCurrent()) return;
       if (statusEl) statusEl.textContent = `RTSP 启动失败：${e.message}`;
       if (resultBox) resultBox.innerHTML = `<div class="result-banner danger"><div class="result-title">RTSP 启动失败</div><div class="result-subtitle">${e.message}</div></div>`;
+      this.setRecognitionMirrorStatus?.('lpr', 'error', e.message || 'RTSP 启动失败', mirrorSource);
       alert(e.message);
     }
   },
 
   async startVideoFileStream(file) {
-    this.stopVideoStream();
+    await this.stopVideoStream();
     this.lprVideoMode = 'file';
+    const mirrorSource = file?.name ? `本地视频 · ${file.name}` : '本地视频';
+    const runtime = this.streamRuntime('lpr');
+    runtime.mode = 'file';
+    runtime.source = mirrorSource;
+    runtime.failed = false;
+    const generation = this.claimModuleRun('lpr');
+    const isCurrent = () => this.isCurrentModuleRun('lpr', generation);
+    this.setRecognitionMirrorStatus?.('lpr', 'connecting', '正在连接识别服务', mirrorSource);
     const video = document.getElementById('lpr-video-output');
     const canvas = document.getElementById('lpr-canvas');
     const progress = document.getElementById('lpr-video-progress');
@@ -1653,8 +2054,21 @@ const App = {
 
     try {
       debug('connecting websocket');
-      this.lprVideoWs = new WebSocket(`${this.wsBase()}/ws/stream/lpr`);
+      const tokenQuery = this.token ? `?token=${encodeURIComponent(this.token)}` : '';
+      this.lprVideoWs = new WebSocket(`${this.wsBase()}/ws/stream/lpr${tokenQuery}`);
+      const ws = this.lprVideoWs;
+      let opened = false;
+      let resolveOpen;
+      let rejectOpen;
+      const openPromise = new Promise((resolve, reject) => {
+        resolveOpen = resolve;
+        rejectOpen = reject;
+      });
       this.lprVideoWs.onopen = async () => {
+        if (!isCurrent() || this.lprVideoWs !== ws) return;
+        opened = true;
+        resolveOpen();
+        this.setRecognitionMirrorStatus?.('lpr', 'running', '实时识别中', mirrorSource);
         debug('websocket open');
           if (progressText) progressText.textContent = '识别连接已建立，正在尝试播放视频…';
         if (statusEl) statusEl.textContent = 'WebSocket 已连接，等待视频播放…';
@@ -1668,12 +2082,14 @@ const App = {
         }
       };
       this.lprVideoWs.onmessage = (e) => {
+        if (!isCurrent() || this.lprVideoWs !== ws) return;
         const msg = JSON.parse(e.data);
         if (msg.type === 'error') {
           this.lprVideoBusy = false;
           debug('ws error message', msg.message);
           if (progressText) progressText.textContent = '识别失败: ' + msg.message;
           if (videoResult) videoResult.innerHTML = `<div class="result-banner danger"><div class="result-title">视频识别失败</div><div class="result-subtitle">${msg.message}</div></div>`;
+          this.setRecognitionMirrorStatus?.('lpr', 'error', msg.message || '视频识别失败', mirrorSource);
           return;
         }
         if (msg.type === 'done') {
@@ -1687,6 +2103,7 @@ const App = {
           } else if (progressText) {
             progressText.textContent = `视频识别完成，未保存有效历史记录（frames=${msg.frames || 0}, raw=${msg.raw_valid || 0}）`;
           }
+          this.setRecognitionMirrorStatus?.('lpr', 'complete', '视频识别已完成', mirrorSource);
           return;
         }
         if (msg.type === 'result') {
@@ -1705,6 +2122,9 @@ const App = {
           }
           if (progressFill) progressFill.style.width = Math.min(100, 5 + sentCount * 2) + '%';
           if (progressText) progressText.textContent = `实时识别中 · 已处理 ${frameCount} 帧`;
+          this.publishRecognitionResult?.('lpr', data, {
+            status: 'running', statusText: '实时识别中', source: mirrorSource,
+          });
           (data.plates || []).forEach(p => {
             const plate = (p.plate_number || '').trim();
             const conf = Number(p.confidence || 0);
@@ -1724,16 +2144,25 @@ const App = {
         }
       };
       this.lprVideoWs.onerror = (err) => {
+        if (!isCurrent()) return;
         debug('websocket error', err);
+        this.setRecognitionMirrorStatus?.('lpr', 'error', '识别连接失败', mirrorSource);
+        if (!opened) rejectOpen(new Error('实时识别 WebSocket 连接失败'));
       };
-      await new Promise((resolve, reject) => {
-        this.lprVideoWs.onopen = () => resolve();
-        this.lprVideoWs.onerror = () => reject(new Error('实时识别 WebSocket 连接失败'));
-      });
+      this.lprVideoWs.onclose = () => {
+        if (!opened) {
+          const error = new Error('视频识别启动已取消');
+          error.name = 'AbortError';
+          rejectOpen(error);
+        }
+      };
+      await openPromise;
+      if (!isCurrent() || this.lprVideoWs !== ws) return;
       debug('websocket ready, start timer');
       if (progressText) progressText.textContent = '识别连接已建立，正在播放并发送视频帧…';
       const ctx = canvas ? canvas.getContext('2d') : null;
       this.lprVideoTimer = setInterval(() => {
+        if (!isCurrent() || this.lprVideoWs !== ws) return;
         if (!video) return;
         if (video.paused || video.ended) return;
         if (video.readyState < 2) return;
@@ -1749,7 +2178,9 @@ const App = {
         this.lprVideoWs.send(JSON.stringify({ type: 'frame', data: dataUrl.split(',')[1] }));
       }, 250);
       video.onended = async () => {
+        if (!isCurrent() || this.lprVideoWs !== ws) return;
         debug('video ended');
+        this.setRecognitionMirrorStatus?.('lpr', 'complete', '视频识别已完成', mirrorSource);
         if (progressText) progressText.textContent = '视频播放完成';
         if (progressFill) progressFill.style.width = '100%';
         if (this.lprVideoWs && this.lprVideoWs.readyState === WebSocket.OPEN) {
@@ -1787,10 +2218,12 @@ const App = {
         this.setLprLoading(false);
       };
     } catch (e) {
+      if (!isCurrent() || e?.name === 'AbortError') return;
       debug('startVideoFileStream failed', e);
       if (progressText) progressText.textContent = '视频识别失败';
       if (videoResult) videoResult.innerHTML = `<div class="result-banner danger"><div class="result-title">视频识别失败</div><div class="result-subtitle">${e.message}</div></div>`;
       if (playbackTools) playbackTools.classList.add('hidden');
+      this.setRecognitionMirrorStatus?.('lpr', 'error', e.message || '视频识别失败', mirrorSource);
       alert(e.message);
       this.setLprLoading(false);
     }
@@ -1798,8 +2231,16 @@ const App = {
 
 
   async stopVideoStream() {
+    this.stopStream('lpr');
+    this.setRecognitionMirrorStatus?.('lpr', 'idle', '未运行', '', { clearPreview: true });
     if (this.lprVideoTimer) { clearInterval(this.lprVideoTimer); this.lprVideoTimer = null; }
-    if (this.lprVideoWs) { this.lprVideoWs.close(); this.lprVideoWs = null; }
+    if (this.lprVideoWs) {
+      this.lprVideoWs.onopen = null;
+      this.lprVideoWs.onmessage = null;
+      this.lprVideoWs.onerror = null;
+      this.lprVideoWs.close();
+      this.lprVideoWs = null;
+    }
     if (this.lprRtspTimer) { clearInterval(this.lprRtspTimer); this.lprRtspTimer = null; }
     if (this.lprRtspWs) { this.lprRtspWs.close(); this.lprRtspWs = null; }
     if (this.lprRtspCapture) { clearInterval(this.lprRtspCapture); this.lprRtspCapture = null; }
@@ -1808,8 +2249,10 @@ const App = {
     this.lprRtspBusy = false;
     this.lprVideoMode = null;
     this.lprRtspMode = null;
-    const sourceName = this.lprRtspSourceName || 'live1';
+    const sourceName = this.lprRtspSourceName || '';
+    const rtspUrl = this.lprRtspUrl || '';
     this.lprRtspSourceName = null;
+    this.lprRtspUrl = null;
     this.setLprLoading(false);
     const fileVideo = document.getElementById('lpr-video-output');
     if (fileVideo) {
@@ -1836,40 +2279,68 @@ const App = {
     if (rtspDebug) rtspDebug.textContent = '预览未加载';
     const rtspImg = document.getElementById('lpr-rtsp-video');
     if (rtspImg) { rtspImg.removeAttribute('src'); rtspImg.src = ''; }
+    if (!sourceName && !rtspUrl) return;
     try {
       const headers = { 'Content-Type': 'application/json' };
       if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
       await fetch(this.apiUrl('/api/lpr/rtsp/stop'), {
         method: 'POST',
         headers,
-        body: JSON.stringify({ source_name: sourceName }),
+        body: JSON.stringify({ source_name: sourceName || '__unknown_source__', rtsp_url: rtspUrl }),
       });
     } catch (e) {
       console.warn('[STOP-RTSP]', e);
     }
-    this.stopStream();
   },
 
-  stopStream() {
-    if (this.streamInterval) { clearInterval(this.streamInterval); this.streamInterval = null; }
-    if (this.streamTimeout) { clearTimeout(this.streamTimeout); this.streamTimeout = null; }
-    if (this.wsStream) { this.wsStream.close(); this.wsStream = null; }
-    this.streamBusy = false;
-    const uploadVideo = document.getElementById('police-upload-preview');
-    if (uploadVideo && !uploadVideo.hidden) uploadVideo.pause();
-    const uploadPlay = document.getElementById('police-upload-play');
-    if (uploadPlay) uploadPlay.textContent = '播放视频';
-    const streamPreview = document.getElementById('police-stream-preview');
-    if (streamPreview) {
-      streamPreview.hidden = true;
-      streamPreview.removeAttribute('src');
+  stopStream(module) {
+    if (!module) {
+      this.stopAllModuleStreams();
+      return;
     }
-    if (this.streamModule) {
-      const video = document.getElementById(this.streamModule + '-video');
-      if (video?.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
-      if (video) video.hidden = true;
-      this.streamModule = null;
+    const runtime = this.streamRuntime(module);
+    runtime.generation = (runtime.generation || 0) + 1;
+    if (runtime.interval) { clearInterval(runtime.interval); runtime.interval = null; }
+    if (runtime.timeout) { clearTimeout(runtime.timeout); runtime.timeout = null; }
+    if (runtime.ws) {
+      const ws = runtime.ws;
+      runtime.ws = null;
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
+      try { ws.close(); } catch (e) {}
     }
+    runtime.busy = false;
+    runtime.mode = null;
+    runtime.failed = false;
+
+    if (module === 'police') {
+      const uploadVideo = document.getElementById('police-upload-preview');
+      if (uploadVideo && !uploadVideo.hidden) uploadVideo.pause();
+      const uploadPlay = document.getElementById('police-upload-play');
+      if (uploadPlay) uploadPlay.textContent = '播放视频';
+      const streamPreview = document.getElementById('police-stream-preview');
+      if (streamPreview) {
+        streamPreview.hidden = true;
+        streamPreview.removeAttribute('src');
+      }
+    }
+    if (module === 'owner') this.hideGestureConfirm();
+
+    const video = document.getElementById(module + '-video');
+    if (this.moduleCameraBindings[module]) {
+      this.releaseModuleCamera(module);
+    } else if (video?.srcObject) {
+      video.srcObject.getTracks().forEach(track => track.stop());
+      video.srcObject = null;
+    }
+    if (video) video.hidden = true;
+    this.setRecognitionMirrorStatus?.(module, 'idle', '未运行', runtime.source, { clearPreview: true });
+  },
+
+  stopAllModuleStreams() {
+    ['lpr', 'police', 'owner'].forEach(module => this.stopStream(module));
   },
 
   async loadAlerts() {
@@ -1935,7 +2406,7 @@ const App = {
 
   connectAlertSse() {
     if (this.alertSse) return;
-    this.alertSse = new EventSource(this.apiUrl('/api/monitor/stream'));
+    this.alertSse = new EventSource(this.eventStreamUrl('/api/monitor/stream'));
     this.alertSse.onmessage = event => {
       const data = JSON.parse(event.data || '{}');
       if (data.type === 'alert') { this.showToast(data); this.loadAlerts(); }
@@ -2092,7 +2563,7 @@ const App = {
       if (status) status.textContent = '未连接';
       return;
     }
-    this.logSse = new EventSource(this.apiUrl('/api/monitor/logs/stream'));
+    this.logSse = new EventSource(this.eventStreamUrl('/api/monitor/logs/stream'));
     this.logSse.onopen = () => { const status = document.getElementById('log-stream-status'); if (status) status.textContent = '已连接'; };
     this.logSse.onmessage = () => { this.loadLogs(); this.loadLogStats(); };
     this.logSse.onerror = () => { this.logSse?.close(); this.logSse = null; if (button) button.textContent = '开启实时日志'; const status = document.getElementById('log-stream-status'); if (status) status.textContent = '连接中断'; };

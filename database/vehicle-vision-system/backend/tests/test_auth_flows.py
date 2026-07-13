@@ -14,10 +14,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
-from app.database import engine, init_db
-from app.models.user import User
+from app.database import SessionLocal, engine, init_db
+from app.models.logs import SystemLog
+from app.models.user import User, VerificationCode
 from app.routers.auth import router as auth_router
 from app.services.auth_email import EmailDeliveryError, send_verification_email
+from app.utils.crypto import ENCRYPTED_PREFIX
 
 
 init_db()
@@ -47,6 +49,11 @@ class AuthenticationFlowTests(unittest.TestCase):
         self.assertEqual(sent.status_code, 200)
         self.assertNotIn("code", sent.json())
         registration_code = send_email.call_args.args[1]
+        with SessionLocal() as db:
+            stored_code = db.query(VerificationCode).order_by(VerificationCode.id.desc()).first()
+            self.assertNotEqual(stored_code.target, "password@example.com")
+            self.assertNotEqual(stored_code.code, registration_code)
+            self.assertTrue(stored_code.code_hash)
 
         registered = self.client.post(
             "/api/auth/register",
@@ -58,6 +65,24 @@ class AuthenticationFlowTests(unittest.TestCase):
             },
         )
         self.assertEqual(registered.status_code, 200)
+        with SessionLocal() as db:
+            stored_user = db.query(User).filter(User.username == "password_user").one()
+            self.assertNotEqual(stored_user.hashed_password, "safe-password-123")
+            self.assertTrue(stored_user.hashed_password.startswith("$2"))
+            self.assertNotEqual(stored_user.email, "password@example.com")
+            self.assertNotIn("password@example.com", stored_user.email_encrypted)
+            self.assertTrue(stored_user.email_encrypted.startswith(ENCRYPTED_PREFIX))
+            registration_log = db.query(SystemLog).order_by(SystemLog.id.desc()).first()
+            self.assertEqual(registration_log.user_id, stored_user.id)
+
+        failed_login = self.client.post(
+            "/api/auth/login",
+            json={"username": "password_user", "password": "wrong-password"},
+        )
+        self.assertEqual(failed_login.status_code, 401)
+        with SessionLocal() as db:
+            failed_login_log = db.query(SystemLog).order_by(SystemLog.id.desc()).first()
+            self.assertEqual(failed_login_log.user_id, stored_user.id)
 
         logged_in = self.client.post(
             "/api/auth/login",
@@ -68,6 +93,7 @@ class AuthenticationFlowTests(unittest.TestCase):
         current_user = self.client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
         self.assertEqual(current_user.status_code, 200)
         self.assertEqual(current_user.json()["username"], "password_user")
+        self.assertEqual(current_user.json()["email"], "password@example.com")
 
     @patch("app.routers.auth.send_verification_email")
     def test_email_verification_code_login(self, send_email):
@@ -126,6 +152,16 @@ class AuthenticationFlowTests(unittest.TestCase):
         self.assertIn("注册账号", html)
         self.assertNotIn("微信扫码", html)
         self.assertNotIn("每个注册账号都会进入自己的独立工作台", html)
+
+    def test_login_frontend_matches_auth_api_contract(self):
+        js = (Path(__file__).resolve().parents[1] / "static" / "js" / "app.js").read_text(encoding="utf-8")
+        for marker in (
+            "'register-email'", "'register-code'", "verification_code: verificationCode",
+            "'code-email'", "JSON.stringify({ email, purpose })", "JSON.stringify({ email, code })",
+        ):
+            self.assertIn(marker, js)
+        for legacy_marker in ("'code-target'", "'register-phone'", "target_type"):
+            self.assertNotIn(legacy_marker, js)
 
     @patch("app.services.auth_email.smtplib.SMTP")
     def test_verification_email_uses_starttls_smtp(self, smtp):
