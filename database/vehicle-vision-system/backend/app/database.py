@@ -153,7 +153,7 @@ def check_db_connection() -> bool:
 
 
 def init_db():
-    from app.models import user, records, logs, alerts  # noqa: F401
+    from app.models import alerts, logs, records, scenario, user  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
     _migrate_schema()

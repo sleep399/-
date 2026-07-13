@@ -8,13 +8,27 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Awaitable
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.services.alert_agent import alert_agent
+from app.services.scenario_fusion_service import scenario_fusion_service
 from app.utils.logger import write_log
 from app.utils.log_display import humanize_error_text
+
+monitor_logger = logging.getLogger("vehicle-vision.recognition-monitor")
+
+
+async def _observe_scenario(awaitable: Awaitable[Any]) -> None:
+    """融合建议是旁路能力；异常不能反向中断原识别流程。"""
+    try:
+        await awaitable
+    except Exception as exc:
+        monitor_logger.warning("场景融合旁路采集失败: %s", exc)
+
 
 async def record_lpr_recognition(
     db: Session,
@@ -59,6 +73,14 @@ async def record_lpr_recognition(
     write_log(db, "lpr", message, level=level, detail=detail, user_id=user_id)
     alert_agent.record_lpr_result(success)
     await alert_agent.check_and_alert(db, "lpr")
+    await _observe_scenario(scenario_fusion_service.ingest_lpr(
+        db,
+        success=success,
+        plate_count=plate_count,
+        plates=plates,
+        source=source,
+        evaluate_conflicts=False,
+    ))
 
 
 async def record_police_recognition(
@@ -96,6 +118,15 @@ async def record_police_recognition(
 
     write_log(db, "police_gesture", message, level=level, detail=detail, user_id=user_id)
     await alert_agent.check_and_alert(db, "police")
+    if gesture and not error:
+        await _observe_scenario(scenario_fusion_service.ingest_police(
+            db,
+            gesture=gesture,
+            gesture_cn=gesture_cn,
+            confidence=confidence,
+            source=source,
+            evaluate_conflicts=False,
+        ))
 
 
 async def record_owner_recognition(
@@ -154,6 +185,16 @@ async def record_owner_recognition(
 
     write_log(db, "owner_gesture", message, level=level, detail=detail, user_id=user_id)
     await alert_agent.check_and_alert(db, "owner")
+    if not error and (action or (gesture and gesture != "no_gesture")):
+        await _observe_scenario(scenario_fusion_service.ingest_owner(
+            db,
+            gesture=gesture,
+            gesture_cn=gesture_cn,
+            action=action,
+            confidence=confidence,
+            source=source,
+            evaluate_conflicts=False,
+        ))
 
 
 def record_owner_vehicle_state(

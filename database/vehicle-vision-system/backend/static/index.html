@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>车载视觉感知与人机交互系统</title>
   <link rel="stylesheet" href="/static/css/style.css?v=20260713-merge1">
-  <link rel="stylesheet" href="/static/css/monitoring-workbench.css?v=20260713-merge1">
+  <link rel="stylesheet" href="/static/css/monitoring-workbench.css?v=20260713-scenario3">
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 </head>
 <body>
@@ -309,6 +309,18 @@
         <!-- 告警中心 -->
         <section id="view-alerts" class="view">
           <h2>告警中心</h2>
+
+          <!-- 多路感知融合面板 -->
+          <div class="panel scenario-fusion-panel" id="scenario-fusion-panel">
+            <div class="panel-header-row">
+              <h3>多路感知 · 场景冲突与融合建议</h3>
+              <button class="btn small" type="button" onclick="App.loadScenarioFusion()">刷新</button>
+            </div>
+            <div id="scenario-snapshot" class="scenario-snapshot-strip"></div>
+            <div id="scenario-driving-advice" class="scenario-driving-advice"></div>
+            <div id="scenario-conflicts" class="scenario-conflicts-list"></div>
+          </div>
+
           <div class="toolbar toolbar-wrap alert-toolbar">
             <div class="toolbar-row">
               <div class="toolbar-field alert-field-select">
@@ -673,7 +685,7 @@
         </div>
       </div>
     </div>
-  <script src="/static/js/app.js?v=20260713-authfix1"></script>
-  <script src="/static/js/monitoring-workbench.js?v=20260712-monitor3"></script>
+  <script src="/static/js/app.js?v=20260713-scenario3"></script>
+  <script src="/static/js/monitoring-workbench.js?v=20260713-scenario3"></script>
 </body>
 </html>

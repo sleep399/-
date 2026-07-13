@@ -14,7 +14,6 @@ from app.config import settings
 from app.models.scenario import ScenarioConflict
 from app.services.alert_agent import alert_agent
 from app.services.llm_service import llm_service
-from app.services.owner_gesture_service import owner_gesture_service
 from app.utils.logger import write_agent_log, write_log
 from app.utils.scenario_rules import (
     CONFLICT_RULES,
@@ -59,6 +58,24 @@ class ScenarioFusionService:
         self._last_signals[module] = payload
         self._prune_events()
 
+    def _latest_window_events(self) -> dict[str, dict[str, Any] | None]:
+        """返回时间窗口内各模块最新事件，避免卡片长期展示过期信号。"""
+        latest: dict[str, dict[str, Any] | None] = {
+            "lpr": None,
+            "police": None,
+            "owner": None,
+        }
+        cutoff = self._window_cutoff()
+        for event in reversed(self._events):
+            if event["timestamp"] < cutoff:
+                break
+            module = event["module"]
+            if module in latest and latest[module] is None:
+                latest[module] = event
+            if all(latest.values()):
+                break
+        return latest
+
     def _fusion_status_hint(self, correlated: dict[str, Any] | None = None) -> str:
         snap = correlated or self._build_correlation_snapshot()
         has_police = bool(snap.get("police_gesture"))
@@ -78,9 +95,10 @@ class ScenarioFusionService:
 
     def get_snapshot(self) -> dict[str, Any]:
         """返回多路感知实时快照（供 API / 助手使用）。"""
-        police = self._last_signals.get("police") or {}
-        owner = self._last_signals.get("owner") or {}
-        lpr = self._last_signals.get("lpr") or {}
+        latest = self._latest_window_events()
+        police = latest["police"] or {}
+        owner = latest["owner"] or {}
+        lpr = latest["lpr"] or {}
         correlated = self._build_correlation_snapshot()
         plate_labels = normalize_plate_labels(lpr.get("plates"))
         return {
@@ -107,8 +125,9 @@ class ScenarioFusionService:
                 "updated_at": owner.get("updated_at"),
             },
             "open_conflicts": sum(1 for c in self._recent_conflicts if c.get("status") == "open"),
-            "owner_suppressed": owner_gesture_service.is_action_suppressed()[0],
-            "suppress_reason": owner_gesture_service.is_action_suppressed()[1],
+            # 仅观察三路识别日志，不改变车主控车行为。
+            "owner_suppressed": False,
+            "suppress_reason": None,
         }
 
     def _advice_cache_key(self, correlated: dict[str, Any]) -> str:
@@ -170,7 +189,7 @@ class ScenarioFusionService:
                 owner = event
             elif mod == "lpr" and lpr is None:
                 lpr = event
-            if police and owner:
+            if police and owner and lpr:
                 break
 
         snapshot: dict[str, Any] = {
@@ -204,15 +223,18 @@ class ScenarioFusionService:
         plate_count: int = 0,
         plates: list | None = None,
         source: str = "",
+        evaluate_conflicts: bool = True,
     ) -> ScenarioConflict | None:
         payload = {
             "success": success,
             "plate_count": plate_count,
-            "plates": normalize_plate_labels(plates),
+            "plates": normalize_plate_labels(plates) if success and plate_count > 0 else [],
             "source": source,
             "updated_at": self._now().isoformat(),
         }
         self._record_event("lpr", payload)
+        if not evaluate_conflicts:
+            return None
         return await self.evaluate(db, trigger_module="lpr")
 
     async def ingest_police(
@@ -223,8 +245,13 @@ class ScenarioFusionService:
         gesture_cn: str | None = None,
         confidence: float = 0.0,
         source: str = "",
+        evaluate_conflicts: bool = True,
     ) -> ScenarioConflict | None:
-        if not gesture or gesture == "no_gesture":
+        if (
+            not gesture
+            or gesture == "no_gesture"
+            or confidence < settings.low_confidence_threshold
+        ):
             return None
         payload = {
             "gesture": gesture,
@@ -234,6 +261,8 @@ class ScenarioFusionService:
             "updated_at": self._now().isoformat(),
         }
         self._record_event("police", payload)
+        if not evaluate_conflicts:
+            return None
         return await self.evaluate(db, trigger_module="police")
 
     async def ingest_owner(
@@ -245,6 +274,7 @@ class ScenarioFusionService:
         action: str | None = None,
         confidence: float = 0.0,
         source: str = "",
+        evaluate_conflicts: bool = True,
     ) -> ScenarioConflict | None:
         has_gesture = bool(gesture and gesture != "no_gesture")
         if not action and not has_gesture:
@@ -259,7 +289,7 @@ class ScenarioFusionService:
             "updated_at": self._now().isoformat(),
         }
         self._record_event("owner", payload)
-        if not action:
+        if not action or not evaluate_conflicts:
             return None
         return await self.evaluate(db, trigger_module="owner")
 
@@ -297,13 +327,8 @@ class ScenarioFusionService:
         severity = rule.get("severity", "warning")
         scenario_id = str(uuid.uuid4())[:12]
         fusion_text = build_fusion_summary(rule, snapshot)
-        suppress = bool(rule.get("suppress_owner"))
-
-        if suppress:
-            owner_gesture_service.set_action_suppression(
-                settings.scenario_suppress_seconds,
-                fusion_text,
-            )
+        # 场景融合仅提供告警与驾驶建议，不接管其他模块的动作执行。
+        suppress = False
 
         context = {
             "scenario_id": scenario_id,
@@ -440,8 +465,6 @@ class ScenarioFusionService:
         row.resolved_at = self._now()
         db.commit()
         db.refresh(row)
-
-        owner_gesture_service.clear_action_suppression()
 
         if row.alert_id:
             from app.models.alerts import AlertEvent

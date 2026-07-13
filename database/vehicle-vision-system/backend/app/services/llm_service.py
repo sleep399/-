@@ -589,12 +589,15 @@ class LLMService:
             content = data["choices"][0]["message"]["content"]
             parsed = self._parse_json_response(content)
             if parsed and parsed.get("advice"):
+                priority = str(parsed.get("priority") or fallback.get("priority", "normal")).lower()
+                if priority not in {"high", "medium", "normal"}:
+                    priority = "normal"
                 return {
                     "advice": humanize_tech_terms(str(parsed["advice"]).strip()),
                     "signals_summary": humanize_tech_terms(
                         str(parsed.get("signals_summary") or fallback.get("signals_summary", ""))
                     ),
-                    "priority": str(parsed.get("priority") or fallback.get("priority", "normal")),
+                    "priority": priority,
                     "mode": "llm",
                     "sources": fallback.get("sources", {}),
                 }

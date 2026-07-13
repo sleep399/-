@@ -102,6 +102,23 @@ def test_recognition_routes_use_unified_monitoring_without_replacing_workflows()
     for filename, marker in expected.items():
         assert marker in (router_dir / filename).read_text(encoding="utf-8")
 
+    monitor_source = (
+        BACKEND_DIR / "app" / "utils" / "recognition_monitor.py"
+    ).read_text(encoding="utf-8")
+    assert "scenario_fusion_service.ingest_lpr" in monitor_source
+    assert "scenario_fusion_service.ingest_police" in monitor_source
+    assert "scenario_fusion_service.ingest_owner" in monitor_source
+    assert monitor_source.count("evaluate_conflicts=False") == 3
+
+
+def test_scenario_observer_failure_does_not_break_recognition_workflow():
+    from app.utils.recognition_monitor import _observe_scenario
+
+    async def broken_observer():
+        raise RuntimeError("scenario unavailable")
+
+    asyncio.run(_observe_scenario(broken_observer()))
+
 
 def test_monitoring_frontend_exposes_structured_alerts_and_chinese_logs():
     html = (BACKEND_DIR / "static" / "index.html").read_text(encoding="utf-8")
@@ -109,6 +126,7 @@ def test_monitoring_frontend_exposes_structured_alerts_and_chinese_logs():
     js += (BACKEND_DIR / "static" / "js" / "monitoring-workbench.js").read_text(encoding="utf-8")
     assert 'id="assistant-context-bar"' in html
     assert 'id="test-alert-type"' in html
+    assert 'monitoring-workbench.js?v=20260713-scenario3' in html
     assert '<option value="警告">警告</option>' in html
     assert "severity_assessment" in js
     assert "focusedAlertId" in js
@@ -121,13 +139,14 @@ def test_complete_monitoring_workbench_assets_and_controls_are_present():
     css = (BACKEND_DIR / "static" / "css" / "monitoring-workbench.css").read_text(encoding="utf-8")
     for element_id in (
         "assistant-bot", "agent-activity", "alert-analytics-panel",
-        "replay-player", "assistant-context-bar",
+        "replay-player", "assistant-context-bar", "scenario-fusion-panel",
+        "scenario-snapshot", "scenario-driving-advice", "scenario-conflicts",
     ):
         assert f'id="{element_id}"' in html
     for marker in (
         "initAssistant", "runAgentPatrol", "askAssistant", "startVoiceInput",
         "speakAssistant", "exportLogs", "renderLogStats", "viewReplay",
-        "loadAlertAnalytics",
+        "loadAlertAnalytics", "loadScenarioFusion", "renderScenarioDrivingAdvice",
     ):
         assert marker in workbench
     assert ".assistant-panel" in css
