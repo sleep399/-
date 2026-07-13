@@ -64,6 +64,19 @@ class AlertAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(answer, str)
         self.assertGreater(len(answer), 0)
 
+    async def test_assistant_accepts_conversation_history(self):
+        answer = await llm_service.ask_assistant(
+            "那接下来呢？",
+            {"event_type": "test_event", "title": "测试提醒", "system_status": {"open_alerts": 0}},
+            intent="general",
+            history=[
+                {"role": "user", "content": "你好"},
+                {"role": "assistant", "content": "您好，我是小智。"},
+            ],
+        )
+        self.assertIsInstance(answer, str)
+        self.assertGreater(len(answer), 0)
+
     def test_strip_markdown_removes_bold_markers(self):
         """助手回答应去除 Markdown 加粗符号"""
         raw = "现在最应该处理的告警是：**系统配置不完整**。**发生了什么**：配置缺失。"
@@ -292,13 +305,27 @@ class AlertAgentTest(unittest.IsolatedAsyncioTestCase):
 
     def test_needs_alert_context(self):
         """需绑定具体告警的问题与系统级问题应区分"""
-        from app.utils.user_language import needs_alert_context
+        from app.utils.user_language import needs_alert_context, is_chitchat
 
         self.assertTrue(needs_alert_context("这个异常的根因是什么？"))
-        self.assertTrue(needs_alert_context("应该怎么处理？"))
         self.assertTrue(needs_alert_context("当前告警影响有多大？"))
+        self.assertFalse(needs_alert_context("应该怎么处理？"))
+        self.assertFalse(needs_alert_context("根因是什么？"))
         self.assertFalse(needs_alert_context("系统正常吗？"))
         self.assertFalse(needs_alert_context("现在整体状态怎么样？"))
+        self.assertFalse(needs_alert_context("你好"))
+        self.assertTrue(is_chitchat("你好"))
+
+    async def test_assistant_answers_generic_question_without_alert(self):
+        """泛化提问不再强制要求先选定告警"""
+        from app.routers.monitor import assistant_chat, AssistantQuery
+
+        result = await assistant_chat(
+            AssistantQuery(question="应该怎么处理？"),
+            db=self.db,
+        )
+        self.assertFalse(result.get("needs_clarification"))
+        self.assertTrue(result.get("answer"))
 
     def test_build_which_alert_prompt_lists_open_alerts(self):
         from app.utils.user_language import build_which_alert_prompt
