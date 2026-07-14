@@ -75,8 +75,6 @@ class Settings(BaseSettings):
     police_yolo_pose_model: str = "yolo11s-pose.pt"
     police_gesture_model: str = "lstm_yolo11s.pt"
     police_pose_hold_frames: int = 5
-    police_gesture_min_confidence: float = 0.35
-    police_gesture_min_margin: float = 0.03
 
     class Config:
         env_file = str(BASE_DIR / ".env")

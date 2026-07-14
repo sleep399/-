@@ -139,17 +139,13 @@ def prepare(split: str, batch_size: int, device: str) -> None:
         prepare_video(model, video_path, cache_path, batch_size, device)
 
 
-def delayed_labels(labels: np.ndarray, delay: int = LABEL_DELAY) -> np.ndarray:
-    if delay < 0:
-        raise ValueError("label delay must be non-negative")
-    if delay == 0:
-        return labels.copy()
-    if len(labels) <= delay:
+def delayed_labels(labels: np.ndarray) -> np.ndarray:
+    if len(labels) <= LABEL_DELAY:
         return np.zeros_like(labels)
-    return np.concatenate((np.zeros(delay, dtype=labels.dtype), labels[:-delay]))
+    return np.concatenate((np.zeros(LABEL_DELAY, dtype=labels.dtype), labels[:-LABEL_DELAY]))
 
 
-def load_cache(split: str, label_delay: int = LABEL_DELAY) -> list[dict[str, np.ndarray]]:
+def load_cache(split: str) -> list[dict[str, np.ndarray]]:
     bla = BoneLengthAngle()
     items = []
     for path in sorted((CACHE_ROOT / split).glob("*.npz")):
@@ -164,7 +160,7 @@ def load_cache(split: str, label_delay: int = LABEL_DELAY) -> list[dict[str, np.
             {
                 "name": path.stem,
                 "features": features,
-                "labels": delayed_labels(data["labels"].astype(np.int64), label_delay),
+                "labels": delayed_labels(data["labels"].astype(np.int64)),
                 "valid": data["valid"].astype(np.bool_),
             }
         )
@@ -212,37 +208,7 @@ def confusion_metrics(confusion: np.ndarray) -> dict:
         f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
         rows.append({"class": cls, "precision": precision, "recall": recall, "f1": f1, "support": int(confusion[cls].sum())})
         f1_values.append(f1)
-    no_gesture_total = int(confusion[0].sum())
-    false_gesture_rate = (
-        float((no_gesture_total - confusion[0, 0]) / no_gesture_total)
-        if no_gesture_total
-        else 0.0
-    )
-    return {
-        "macro_f1": float(np.mean(f1_values)),
-        "gesture_macro_f1": float(np.mean(f1_values[1:])),
-        "false_gesture_rate": false_gesture_rate,
-        "per_class": rows,
-        "confusion_matrix": confusion.tolist(),
-    }
-
-
-def calculate_class_weights(
-    counts: np.ndarray,
-    power: float = 0.5,
-    no_gesture_multiplier: float = 1.0,
-) -> np.ndarray:
-    if power < 0:
-        raise ValueError("class-weight power must be non-negative")
-    if no_gesture_multiplier <= 0:
-        raise ValueError("no-gesture weight multiplier must be positive")
-    counts = np.asarray(counts, dtype=np.float64)
-    if counts.ndim != 1 or len(counts) != NUM_CLASSES:
-        raise ValueError(f"expected {NUM_CLASSES} class counts")
-    weights = np.power(counts.sum() / np.maximum(counts, 1), power)
-    weights[0] *= no_gesture_multiplier
-    weights /= weights.mean()
-    return weights.astype(np.float32)
+    return {"macro_f1": float(np.mean(f1_values)), "per_class": rows, "confusion_matrix": confusion.tolist()}
 
 
 @torch.no_grad()
@@ -264,14 +230,11 @@ def evaluate_model(model: GestureRecognitionModel, videos: list[dict[str, np.nda
 
 def train(args) -> dict:
     seed_everything(args.seed)
-    all_train = load_cache("train", args.label_delay)
+    all_train = load_cache("train")
     validation_count = min(args.validation_videos, max(1, len(all_train) - 1))
     train_videos = all_train[:-validation_count]
-    validation_label_delay = getattr(args, "validation_label_delay", None)
-    if validation_label_delay is None:
-        validation_label_delay = args.label_delay
-    validation_videos = load_cache("train", validation_label_delay)[-validation_count:]
-    test_videos = None if args.skip_test else load_cache("test", args.label_delay)
+    validation_videos = all_train[-validation_count:]
+    test_videos = load_cache("test")
 
     device = torch.device(args.device)
     model = GestureRecognitionModel(args.batch_size).to(device)
@@ -281,17 +244,15 @@ def train(args) -> dict:
     counts = np.zeros(NUM_CLASSES, dtype=np.int64)
     for video in train_videos:
         counts += np.bincount(video["labels"][video["valid"]], minlength=NUM_CLASSES)
-    weights = calculate_class_weights(counts, args.class_weight_power, args.no_gesture_weight_multiplier)
-    class_weights = torch.tensor(weights, dtype=torch.float32, device=device)
-    criterion = nn.CrossEntropyLoss(weight=class_weights, reduction="none")
+    weights = np.sqrt(counts.sum() / np.maximum(counts, 1))
+    weights /= weights.mean()
+    criterion = nn.CrossEntropyLoss(weight=torch.tensor(weights, dtype=torch.float32, device=device), reduction="none")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
 
     best_f1 = -1.0
     stale_epochs = 0
     history = []
-    output_path = Path(args.output_path)
-    report_path = Path(args.report_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     for epoch in range(1, args.epochs + 1):
         model.train()
         losses = []
@@ -304,10 +265,7 @@ def train(args) -> dict:
             c = torch.zeros_like(h)
             _, _, _, logits = model(features, h, c)
             frame_loss = criterion(logits, labels)
-            # Keep the effective loss scale comparable across class-weight
-            # schemes instead of changing it with the average sample weight.
-            valid_weights = class_weights[labels[valid]]
-            loss = frame_loss[valid].sum() / valid_weights.sum().clamp_min(1e-12)
+            loss = frame_loss[valid].mean()
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -321,49 +279,34 @@ def train(args) -> dict:
         if validation["macro_f1"] > best_f1:
             best_f1 = validation["macro_f1"]
             stale_epochs = 0
-            torch.save(model.state_dict(), output_path)
+            torch.save(model.state_dict(), OUTPUT_PATH)
         else:
             stale_epochs += 1
             if stale_epochs >= args.patience:
                 print(f"early stopping at epoch {epoch}", flush=True)
                 break
 
-    model.load_state_dict(torch.load(output_path, map_location=device, weights_only=True))
+    model.load_state_dict(torch.load(OUTPUT_PATH, map_location=device, weights_only=True))
     report = {
-        "model": str(output_path),
+        "model": str(OUTPUT_PATH),
         "pose_model": str(MODEL_PATH),
-        "configuration": {
-            "label_delay": args.label_delay,
-            "validation_label_delay": validation_label_delay,
-            "class_weight_power": args.class_weight_power,
-            "no_gesture_weight_multiplier": args.no_gesture_weight_multiplier,
-            "class_weights": weights.tolist(),
-            "loss_normalization": "weighted_sum_over_sample_weights",
-            "clip_len": args.clip_len,
-            "stride": args.stride,
-            "learning_rate": args.learning_rate,
-            "seed": args.seed,
-        },
         "train_videos": [video["name"] for video in train_videos],
         "validation_videos": [video["name"] for video in validation_videos],
         "history": history,
         "validation": evaluate_model(model, validation_videos, device),
-        "test": evaluate_model(model, test_videos, device) if test_videos is not None else None,
+        "test": evaluate_model(model, test_videos, device),
     }
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    summary = {"best_val_macro_f1": report["validation"]["macro_f1"]}
-    if report["test"] is not None:
-        summary["test_macro_f1"] = report["test"]["macro_f1"]
-    print(json.dumps(summary), flush=True)
+    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps({"best_val_macro_f1": report["validation"]["macro_f1"], "test_macro_f1": report["test"]["macro_f1"]}), flush=True)
     return report
 
 
-def evaluate_checkpoint(checkpoint: Path, device_name: str, label_delay: int = LABEL_DELAY) -> dict:
+def evaluate_checkpoint(checkpoint: Path, device_name: str) -> dict:
     device = torch.device(device_name)
     model = GestureRecognitionModel(1).to(device)
     model.load_state_dict(torch.load(checkpoint, map_location=device, weights_only=True))
-    report = evaluate_model(model, load_cache("test", label_delay), device)
+    report = evaluate_model(model, load_cache("test"), device)
     print(json.dumps({"checkpoint": str(checkpoint), **report}, ensure_ascii=False), flush=True)
     return report
 
@@ -380,13 +323,6 @@ def parse_args():
     parser.add_argument("--validation-videos", type=int, default=2)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=20260711)
-    parser.add_argument("--label-delay", type=int, default=LABEL_DELAY)
-    parser.add_argument("--validation-label-delay", type=int)
-    parser.add_argument("--class-weight-power", type=float, default=0.5)
-    parser.add_argument("--no-gesture-weight-multiplier", type=float, default=1.0)
-    parser.add_argument("--output-path", type=Path, default=OUTPUT_PATH)
-    parser.add_argument("--report-path", type=Path, default=REPORT_PATH)
-    parser.add_argument("--skip-test", action="store_true")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--checkpoint", type=Path, default=OUTPUT_PATH)
     return parser.parse_args()
@@ -400,4 +336,4 @@ if __name__ == "__main__":
     if arguments.command in ("train", "all"):
         train(arguments)
     if arguments.command == "evaluate":
-        evaluate_checkpoint(arguments.checkpoint, arguments.device, arguments.label_delay)
+        evaluate_checkpoint(arguments.checkpoint, arguments.device)

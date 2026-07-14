@@ -182,20 +182,6 @@ class PoliceGestureService:
             return float(probs[gesture_id])
         return 0.0
 
-    @staticmethod
-    def _apply_gesture_gate(scores: np.ndarray, min_confidence: float, min_margin: float) -> int:
-        """Reject uncertain non-zero gestures using validation-calibrated limits."""
-        probs = torch.softmax(torch.from_numpy(np.asarray(scores, dtype=np.float32)), dim=0).numpy()
-        gesture_id = int(np.argmax(probs))
-        if gesture_id == 0:
-            return gesture_id
-        ordered = np.partition(probs, -2)
-        confidence = float(ordered[-1])
-        margin = confidence - float(ordered[-2])
-        if confidence < min_confidence or margin < min_margin:
-            return 0
-        return gesture_id
-
     def create_sequence_state(self) -> dict[str, Any]:
         try:
             return {
@@ -390,15 +376,7 @@ class PoliceGestureService:
             _, h, c, class_out = self.g_model(features, state["h"], state["c"])
         state["h"], state["c"] = h, c
         scores = class_out[0].cpu().numpy()
-        if self.pose_backend == "yolo":
-            gesture_id = self._apply_gesture_gate(
-                scores,
-                settings.police_gesture_min_confidence,
-                settings.police_gesture_min_margin,
-            )
-        else:
-            gesture_id = int(np.argmax(scores))
-        return {self.pg.OUT_ARGMAX: gesture_id, self.pg.OUT_SCORES: scores, self.pg.COORD_NORM: coord_norm}
+        return {self.pg.OUT_ARGMAX: int(np.argmax(scores)), self.pg.OUT_SCORES: scores, self.pg.COORD_NORM: coord_norm}
 
     def recognize_prepared_frame_continuous(
         self,
