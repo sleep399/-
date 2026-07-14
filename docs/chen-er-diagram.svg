@@ -13,19 +13,16 @@
     .entity-code { font-size: 14px; fill: #526273; }
     .relationship { fill: #fff1db; stroke: #a35e12; stroke-width: 2; }
     .relationship-label { font-size: 15px; font-weight: 700; fill: #713a08; }
-    .attribute { fill: #ffffff; stroke: #526273; stroke-width: 1.5; }
-    .attribute-text { font-size: 15px; }
     .edge { stroke: #526273; stroke-width: 1.8; fill: none; }
     .logical { stroke-dasharray: 8 6; }
     .cardinality { font-size: 15px; font-weight: 700; fill: #8a4200; }
     .note { font-size: 14px; fill: #526273; }
     .warning-note { font-size: 14px; fill: #8a4200; }
-    .key { text-decoration: underline; font-weight: 700; }
   </style>
 
   <rect width="2200" height="1600" class="background"/>
   <text x="1100" y="42" class="title">车载视觉感知与人机交互系统逻辑 ER 图（9 表）</text>
-  <text x="1100" y="76" class="subtitle">矩形＝实体表　菱形＝逻辑联系　椭圆＝关键属性　下划线＝主键　虚线＝应用层维护、未建数据库外键</text>
+  <text x="1100" y="76" class="subtitle">矩形＝实体表　菱形＝逻辑联系　虚线＝应用层维护、未建数据库外键</text>
   <text x="1100" y="101" class="subtitle">关系基数按当前数据库约束表达：子记录可关联 0..1 个用户，一个用户可拥有 0..n 条子记录</text>
 
   <text x="760" y="260" class="domain">认证域</text>
@@ -37,134 +34,47 @@
   <rect x="940" y="230" width="320" height="80" class="entity"/>
   <text x="1100" y="257" class="entity-name">验证码</text>
   <text x="1100" y="286" class="entity-code">verification_codes</text>
-  <ellipse cx="960" cy="160" rx="48" ry="27" class="attribute"/>
-  <text x="960" y="160" class="attribute-text key">id</text>
-  <line x1="980" y1="185" x2="1005" y2="230" class="edge"/>
-  <ellipse cx="1100" cy="142" rx="92" ry="27" class="attribute"/>
-  <text x="1100" y="142" class="attribute-text">target_lookup</text>
-  <line x1="1100" y1="169" x2="1100" y2="230" class="edge"/>
-  <ellipse cx="1240" cy="160" rx="65" ry="27" class="attribute"/>
-  <text x="1240" y="160" class="attribute-text">purpose</text>
-  <line x1="1220" y1="185" x2="1195" y2="230" class="edge"/>
 
   <!-- users -->
   <rect x="970" y="682" width="260" height="80" class="entity"/>
   <text x="1100" y="709" class="entity-name">用户</text>
   <text x="1100" y="738" class="entity-code">users</text>
-  <ellipse cx="960" cy="620" rx="48" ry="27" class="attribute"/>
-  <text x="960" y="620" class="attribute-text key">id</text>
-  <line x1="985" y1="643" x2="1010" y2="682" class="edge"/>
-  <ellipse cx="1100" cy="602" rx="78" ry="27" class="attribute"/>
-  <text x="1100" y="602" class="attribute-text">username</text>
-  <line x1="1100" y1="629" x2="1100" y2="682" class="edge"/>
-  <ellipse cx="1240" cy="620" rx="92" ry="27" class="attribute"/>
-  <text x="1240" y="620" class="attribute-text">email_lookup</text>
-  <line x1="1215" y1="643" x2="1190" y2="682" class="edge"/>
 
   <!-- license_plate_records -->
   <rect x="180" y="480" width="320" height="80" class="entity"/>
   <text x="340" y="507" class="entity-name">车牌识别记录</text>
   <text x="340" y="536" class="entity-code">license_plate_records</text>
-  <ellipse cx="85" cy="445" rx="48" ry="27" class="attribute"/>
-  <text x="85" y="445" class="attribute-text key">id</text>
-  <line x1="124" y1="461" x2="180" y2="492" class="edge"/>
-  <ellipse cx="85" cy="520" rx="67" ry="27" class="attribute"/>
-  <text x="85" y="520" class="attribute-text">user_id</text>
-  <line x1="152" y1="520" x2="180" y2="520" class="edge"/>
-  <ellipse cx="95" cy="600" rx="88" ry="27" class="attribute"/>
-  <text x="95" y="600" class="attribute-text">plates_json</text>
-  <line x1="136" y1="576" x2="190" y2="555" class="edge"/>
 
   <!-- police_gesture_records -->
   <rect x="120" y="780" width="320" height="80" class="entity"/>
   <text x="280" y="807" class="entity-name">交警手势记录</text>
   <text x="280" y="836" class="entity-code">police_gesture_records</text>
-  <ellipse cx="72" cy="720" rx="48" ry="27" class="attribute"/>
-  <text x="72" y="720" class="attribute-text key">id</text>
-  <line x1="100" y1="742" x2="145" y2="780" class="edge"/>
-  <ellipse cx="70" cy="820" rx="67" ry="27" class="attribute"/>
-  <text x="70" y="820" class="attribute-text">user_id</text>
-  <line x1="137" y1="820" x2="120" y2="820" class="edge"/>
-  <ellipse cx="85" cy="920" rx="73" ry="27" class="attribute"/>
-  <text x="85" y="920" class="attribute-text">gesture</text>
-  <line x1="118" y1="896" x2="160" y2="860" class="edge"/>
 
   <!-- owner_gesture_records -->
   <rect x="270" y="1140" width="320" height="80" class="entity"/>
   <text x="430" y="1167" class="entity-name">车主手势记录</text>
   <text x="430" y="1196" class="entity-code">owner_gesture_records</text>
-  <ellipse cx="110" cy="1090" rx="48" ry="27" class="attribute"/>
-  <text x="110" y="1090" class="attribute-text key">id</text>
-  <line x1="148" y1="1107" x2="290" y2="1148" class="edge"/>
-  <ellipse cx="105" cy="1180" rx="67" ry="27" class="attribute"/>
-  <text x="105" y="1180" class="attribute-text">user_id</text>
-  <line x1="172" y1="1180" x2="270" y2="1180" class="edge"/>
-  <ellipse cx="135" cy="1280" rx="66" ry="27" class="attribute"/>
-  <text x="135" y="1280" class="attribute-text">action</text>
-  <line x1="174" y1="1258" x2="300" y2="1218" class="edge"/>
 
   <!-- vehicle_state -->
   <rect x="940" y="1310" width="320" height="80" class="entity"/>
   <text x="1100" y="1337" class="entity-name">车辆状态</text>
   <text x="1100" y="1366" class="entity-code">vehicle_state</text>
-  <ellipse cx="890" cy="1480" rx="48" ry="27" class="attribute"/>
-  <text x="890" y="1480" class="attribute-text key">id</text>
-  <line x1="915" y1="1457" x2="995" y2="1390" class="edge"/>
-  <ellipse cx="1100" cy="1480" rx="67" ry="27" class="attribute"/>
-  <text x="1100" y="1480" class="attribute-text">user_id</text>
-  <line x1="1100" y1="1453" x2="1100" y2="1390" class="edge"/>
-  <ellipse cx="1310" cy="1480" rx="92" ry="27" class="attribute"/>
-  <text x="1310" y="1480" class="attribute-text">updated_at</text>
-  <line x1="1280" y1="1456" x2="1210" y2="1390" class="edge"/>
   <text x="1100" y="1424" class="warning-note">应用期望每用户最多一条；数据库尚无唯一约束</text>
 
   <!-- system_logs -->
   <rect x="1690" y="460" width="320" height="80" class="entity"/>
   <text x="1850" y="487" class="entity-name">系统日志</text>
   <text x="1850" y="516" class="entity-code">system_logs</text>
-  <ellipse cx="2110" cy="425" rx="48" ry="27" class="attribute"/>
-  <text x="2110" y="425" class="attribute-text key">id</text>
-  <line x1="2070" y1="441" x2="2010" y2="472" class="edge"/>
-  <ellipse cx="2110" cy="500" rx="67" ry="27" class="attribute"/>
-  <text x="2110" y="500" class="attribute-text">user_id</text>
-  <line x1="2043" y1="500" x2="2010" y2="500" class="edge"/>
-  <ellipse cx="2105" cy="575" rx="78" ry="27" class="attribute"/>
-  <text x="2105" y="575" class="attribute-text">category</text>
-  <line x1="2064" y1="552" x2="2010" y2="535" class="edge"/>
 
   <!-- alert_events -->
   <rect x="1690" y="780" width="320" height="80" class="entity"/>
   <text x="1850" y="807" class="entity-name">告警事件</text>
   <text x="1850" y="836" class="entity-code">alert_events</text>
-  <ellipse cx="2110" cy="745" rx="48" ry="27" class="attribute"/>
-  <text x="2110" y="745" class="attribute-text key">id</text>
-  <line x1="2070" y1="761" x2="2010" y2="792" class="edge"/>
-  <ellipse cx="2110" cy="820" rx="67" ry="27" class="attribute"/>
-  <text x="2110" y="820" class="attribute-text">user_id</text>
-  <line x1="2043" y1="820" x2="2010" y2="820" class="edge"/>
-  <ellipse cx="2110" cy="895" rx="64" ry="27" class="attribute"/>
-  <text x="2110" y="895" class="attribute-text">status</text>
-  <line x1="2070" y1="873" x2="2010" y2="848" class="edge"/>
 
   <!-- scenario_conflicts -->
   <rect x="1690" y="1150" width="320" height="80" class="entity"/>
   <text x="1850" y="1177" class="entity-name">场景冲突</text>
   <text x="1850" y="1206" class="entity-code">scenario_conflicts</text>
-  <ellipse cx="2100" cy="1055" rx="48" ry="27" class="attribute"/>
-  <text x="2100" y="1055" class="attribute-text key">id</text>
-  <line x1="2064" y1="1073" x2="1985" y2="1150" class="edge"/>
-  <ellipse cx="2100" cy="1120" rx="67" ry="27" class="attribute"/>
-  <text x="2100" y="1120" class="attribute-text">user_id</text>
-  <line x1="2050" y1="1138" x2="2010" y2="1158" class="edge"/>
-  <ellipse cx="2100" cy="1190" rx="67" ry="27" class="attribute"/>
-  <text x="2100" y="1190" class="attribute-text">alert_id</text>
-  <line x1="2033" y1="1190" x2="2010" y2="1190" class="edge"/>
-  <ellipse cx="2095" cy="1260" rx="88" ry="27" class="attribute"/>
-  <text x="2095" y="1260" class="attribute-text">scenario_id</text>
-  <line x1="2045" y1="1240" x2="2000" y2="1228" class="edge"/>
-  <ellipse cx="1940" cy="1325" rx="64" ry="27" class="attribute"/>
-  <text x="1940" y="1325" class="attribute-text">status</text>
-  <line x1="1910" y1="1301" x2="1885" y2="1230" class="edge"/>
 
   <!-- users -> verification_codes -->
   <polygon points="900,455 980,490 900,525 820,490" class="relationship"/>
